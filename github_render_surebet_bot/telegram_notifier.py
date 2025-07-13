@@ -23,4 +23,5 @@ def send_message(bot_token, chat_id, match):
         "chat_id": chat_id,
         "text": message.strip()
     }
-    requests.post(url, data=data)
+    response = requests.post(url, data=data)
+    print("📬 Telegram API 回應：", response.text)
