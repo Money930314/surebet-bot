@@ -15,7 +15,8 @@ def trigger():
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
     data = scrape_oddsportal_surebets()
-
+    print("📊 爬蟲回傳資料：", data)
+    
     for match in data:
         send_message(bot_token, chat_id, match)
 
