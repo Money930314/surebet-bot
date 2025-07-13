@@ -16,6 +16,10 @@ def trigger():
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     data = scrape_oddsportal_surebets()
 
+     # 測試訊息
+    message = "✅ 這是測試訊息，你已成功收到來自 VPS 的通知！"
+    send_message(bot_token, chat_id, {"custom_message": message})
+
     for match in data:
         send_message(bot_token, chat_id, match)
 
