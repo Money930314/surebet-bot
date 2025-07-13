@@ -16,6 +16,12 @@ def send_message(bot_token, chat_id, match):
 💰 預估利潤：${match['profit']}（{match['roi']}%）
 ✅ 請盡快下單套利！
 """
+print("🔑 Token:", bot_token)
+print("🆔 Chat ID:", chat_id)
+print("📤 發送內容：", message)
+print("📡 回傳結果：", response.text)
+
+    
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
