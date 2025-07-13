@@ -11,19 +11,27 @@ def index():
 
 @app.route("/trigger")
 def trigger():
-    # 抓取資料並發送通知
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    data = scrape_oddsportal_surebets()
 
-     # 測試訊息
-    message = "✅ 這是測試訊息，你已成功收到來自 VPS 的通知！"
-    send_message(bot_token, chat_id, {"custom_message": message})
+    # ✅ 傳入完整假資料
+    match = {
+        "sport": "足球",
+        "league": "英超",
+        "datetime": "2025-07-13 20:00",
+        "venue": "曼聯球場",
+        "roi": "12.3%",
+        "bookmaker1": "Pinnacle",
+        "bookmaker2": "Betfair",
+        "odds1": "2.1",
+        "odds2": "2.05",
+        "url": "https://www.oddsportal.com/test-match",
+        "custom_message": "💰 測試套利成功"
+    }
 
-    for match in data:
-        send_message(bot_token, chat_id, match)
+    send_message(bot_token, chat_id, match)
+    return "✅ 測試訊息已發送"
 
-    return "📬 Messages sent!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
