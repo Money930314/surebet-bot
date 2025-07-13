@@ -20,15 +20,33 @@ def scrape_oddsportal_surebets():
                 sport = row.find_element(By.CSS_SELECTOR, "td:nth-child(1)").text.strip()
                 if not any(s in sport for s in ["Soccer", "Basketball", "Volleyball", "Tennis"]):
                     continue
+
                 match = row.find_element(By.CSS_SELECTOR, "td:nth-child(2)").text.strip()
                 odds_1 = row.find_element(By.CSS_SELECTOR, "td:nth-child(3)").text.strip()
                 odds_2 = row.find_element(By.CSS_SELECTOR, "td:nth-child(4)").text.strip()
                 profit = row.find_element(By.CSS_SELECTOR, "td:nth-child(5)").text.strip()
+
+                roi_str = profit.replace("%", "").replace("+", "").strip()
+                roi = float(roi_str)
+
+                if roi < 1:
+                    continue
+
+                print("🧪 爬到比賽：", match)
+
                 bets.append({
                     "sport": sport,
-                    "match": match,
-                    "odds": [odds_1, odds_2],
-                    "profit": profit
+                    "league": "暫無資料",
+                    "home_team": match.split(" - ")[0].strip(),
+                    "away_team": match.split(" - ")[1].strip() if " - " in match else "Unknown",
+                    "match_time": "2099-01-01 00:00",  # 假設比賽時間未來
+                    "roi": roi,
+                    "profit": 10,
+                    "url": driver.current_url,
+                    "bets": [
+                        {"bookmaker": "Pinnacle", "odds": odds_1, "stake": 200},
+                        {"bookmaker": "BetInAsia", "odds": odds_2, "stake": 200},
+                    ]
                 })
             except:
                 continue
