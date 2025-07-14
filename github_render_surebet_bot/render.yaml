@@ -8,7 +8,7 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         value: 7967768701:AAGbMMmzXm-UUnyp82NV3Ir0pbLkEgfhPjA
       - key: TELEGRAM_CHAT_ID
-        value: 7120810623
+        value: "7120810623"
     plan: free
 
   - type: worker
@@ -20,5 +20,6 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         value: 7967768701:AAGbMMmzXm-UUnyp82NV3Ir0pbLkEgfhPjA
       - key: TELEGRAM_CHAT_ID
-        value: 7120810623
+        value: "7120810623"
     plan: free
+
