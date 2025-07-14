@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: surebet-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        value: 7967768701:AAGbMMmzXm-UUnyp82NV3Ir0pbLkEgfhPjA
+      - key: TELEGRAM_CHAT_ID
+        value: 7120810623
