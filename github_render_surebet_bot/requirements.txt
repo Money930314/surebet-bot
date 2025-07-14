@@ -3,3 +3,4 @@ requests
 beautifulsoup4
 lxml
 selenium
+python-telegram-bot==13.15
