@@ -166,19 +166,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run_telegram_bot():
     """運行 Telegram 機器人"""
     try:
+        # 創建應用程式
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # 添加訊息處理器
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("🤖 Telegram Bot 啟動中，等待 $$$ 指令...")
         
-        # 使用 polling 模式
-        await application.run_polling(
+        # 初始化應用程式
+        await application.initialize()
+        await application.start()
+        
+        # 啟動 polling
+        await application.updater.start_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
         
+        # 保持運行
+        logger.info("✅ Telegram Bot 已啟動，監聽訊息中...")
+        
+        # 等待直到應用程式停止
+        await application.updater.idle()
+        
     except Exception as e:
         logger.error(f"❌ Telegram Bot 啟動失敗: {e}")
+        raise e
+    finally:
+        # 清理資源
+        try:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+        except Exception as cleanup_error:
+            logger.error(f"❌ 清理資源時發生錯誤: {cleanup_error}")
 
 def telegram_listener():
     """Telegram 監聽器包裝函數"""
