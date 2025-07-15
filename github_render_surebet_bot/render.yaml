@@ -4,8 +4,9 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
-    envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        value: 7967768701:AAGbMMmzXm-UUnyp82NV3Ir0pbLkEgfhPjA
-      - key: TELEGRAM_CHAT_ID
-        value: 7120810623
+    # 環境變數改為在 Render 控制台設定，避免敏感資料外洩
+    # envVars:
+    #   - key: TELEGRAM_BOT_TOKEN
+    #     value: 請在 Render 控制台手動設定
+    #   - key: TELEGRAM_CHAT_ID
+    #     value: 請在 Render 控制台手動設定
