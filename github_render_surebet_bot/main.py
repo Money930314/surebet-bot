@@ -356,18 +356,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # 啟動 Telegram Bot 的背景執行緒
+# 啟動 Telegram Bot 的背景執行緒
 async def telegram_bot():
     global telegram_app
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app = application
+
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    logger.info("🤖 Telegram Bot 開始運行")
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
-    await application.updater.idle()
+    await application.wait_until_closed()
+
 
 # 啟動 Flask 與 Telegram Bot
 if __name__ == "__main__":
