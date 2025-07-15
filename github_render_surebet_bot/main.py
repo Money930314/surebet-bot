@@ -30,6 +30,9 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
 # 初始化 Flask 應用
 app = Flask(__name__)
 
+# 全局 Telegram 應用實例
+telegram_app = None
+
 @app.route('/')
 def home():
     return "🤖 Surebet Bot 運行中！"
@@ -163,47 +166,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text="❌ 處理訊息時發生錯誤，請稍後再試"
         )
 
-async def run_telegram_bot():
-    """運行 Telegram 機器人"""
+def setup_telegram_bot():
+    """設定 Telegram 機器人"""
+    global telegram_app
     try:
         # 創建應用程式
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         
         # 添加訊息處理器
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        logger.info("🤖 Telegram Bot 啟動中，等待 $$ 指令...")
+        logger.info("🤖 Telegram Bot 設定完成")
+        return True
         
-        # 使用 run_polling 方法，這是 v20.x 的推薦方式
-        await application.run_polling(
+    except Exception as e:
+        logger.error(f"❌ Telegram Bot 設定失敗: {e}")
+        return False
+
+def flask_server():
+    """Flask 伺服器函數"""
+    logger.info("🚀 Flask 伺服器啟動中...")
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# 🔃 啟動應用
+if __name__ == '__main__':
+    # 設定 Telegram Bot
+    if not setup_telegram_bot():
+        logger.error("❌ 無法設定 Telegram Bot，程式退出")
+        sys.exit(1)
+    
+    # 在子線程中啟動 Flask
+    flask_thread = Thread(target=flask_server, daemon=True)
+    flask_thread.start()
+    
+    logger.info("🤖 Telegram Bot 監聽器啟動中...")
+    
+    # 在主線程中運行 Telegram Bot
+    try:
+        telegram_app.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
-        
-        logger.info("✅ Telegram Bot 已啟動，監聽訊息中...")
-        
+    except KeyboardInterrupt:
+        logger.info("👋 程式被使用者中斷")
     except Exception as e:
-        logger.error(f"❌ Telegram Bot 啟動失敗: {e}")
-        raise e
-
-def telegram_listener():
-    """Telegram 監聽器包裝函數"""
-    try:
-        # 為 Telegram bot 創建新的事件循環
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(run_telegram_bot())
-    except Exception as e:
-        logger.error(f"❌ Telegram 監聽器錯誤: {e}")
-
-# 🔃 啟動 Flask 與 Telegram 監聽
-if __name__ == '__main__':
-    # 啟動 Telegram 監聽器
-    telegram_thread = Thread(target=telegram_listener, daemon=True)
-    telegram_thread.start()
-    
-    logger.info("🚀 Surebet Bot 正在啟動 Flask 應用...")
-    
-    # 啟動 Flask 應用
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+        logger.error(f"❌ Telegram Bot 運行錯誤: {e}")
+    finally:
+        logger.info("🔚 程式結束")
