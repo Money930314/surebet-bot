@@ -71,7 +71,7 @@ def scrape_oddsportal_surebets():
                     roi = float(roi_str)
                     
                     # 修正：ROI 需要 >= 10%
-                    if roi < 10.0:
+                    if roi < 3.0:
                         logger.info(f"⏭️  ROI 過低: {roi}%")
                         continue
                         
