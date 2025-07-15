@@ -11,6 +11,7 @@ import sys
 import random
 import requests
 from bs4 import BeautifulSoup
+import re
 
 # 配置 logging
 logging.basicConfig(
@@ -82,29 +83,68 @@ def scrape_with_requests():
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 檢查是否有套利資料
-        if "sure-bet" in response.text.lower() or "arbitrage" in response.text.lower():
-            logger.info("✅ 找到套利相關內容")
-            # 這裡可以添加具體的解析邏輯
-            # 由於網站結構複雜，現在先返回空列表
+        # 檢查是否有反爬蟲保護
+        page_content = response.text.lower()
+        if any(keyword in page_content for keyword in ['cloudflare', 'ddos', 'bot detection', 'access denied', 'blocked']):
+            logger.warning("⚠️ 檢測到反爬蟲保護 (requests)")
             return []
-        else:
-            logger.warning("⚠️ 未找到套利資料")
-            return []
+        
+        # 嘗試解析套利資料
+        return parse_surebet_data(soup)
             
     except requests.RequestException as e:
         logger.error(f"❌ requests 爬取失敗: {e}")
         return []
 
+def parse_surebet_data(soup):
+    """解析套利資料"""
+    bets = []
+    
+    try:
+        # 嘗試找到套利資料表格或容器
+        # 這裡需要根據實際網站結構來調整選擇器
+        surebet_containers = soup.find_all(['div', 'table', 'tr'], class_=re.compile(r'sure|bet|arbitrage', re.I))
+        
+        if not surebet_containers:
+            logger.info("❌ 未找到套利資料容器")
+            return []
+        
+        for container in surebet_containers:
+            try:
+                # 嘗試提取比賽資訊
+                match_info = extract_match_info(container)
+                if match_info:
+                    bets.append(match_info)
+            except Exception as e:
+                logger.debug(f"解析容器時發生錯誤: {e}")
+                continue
+        
+        logger.info(f"✅ 成功解析 {len(bets)} 筆套利資料")
+        return bets
+        
+    except Exception as e:
+        logger.error(f"❌ 解析套利資料時發生錯誤: {e}")
+        return []
+
+def extract_match_info(container):
+    """從容器中提取比賽資訊"""
+    try:
+        # 這裡需要根據實際的HTML結構來實現
+        # 目前返回 None 表示無法提取
+        return None
+    except Exception as e:
+        logger.debug(f"提取比賽資訊時發生錯誤: {e}")
+        return None
+
 def scrape_oddsportal_surebets():
     """
-    爬取 OddsPortal 的套利投注資料
+    爬取 OddsPortal 的套利投注資料 - 只返回真實資料
     """
     global last_request_time, last_results
     
     # 檢查緩存
     current_time = time.time()
-    if (last_request_time and last_results and 
+    if (last_request_time and last_results is not None and 
         current_time - last_request_time < CACHE_DURATION):
         logger.info("📦 使用緩存資料")
         return last_results
@@ -120,8 +160,11 @@ def scrape_oddsportal_surebets():
     # 如果 requests 失敗，嘗試 Selenium
     driver = create_driver()
     if not driver:
-        logger.error("❌ 無法創建 WebDriver，返回實際套利資料")
-        return get_real_surebet_data()
+        logger.error("❌ 無法創建 WebDriver")
+        # 更新緩存為空結果
+        last_request_time = current_time
+        last_results = []
+        return []
     
     bets = []
     
@@ -149,44 +192,47 @@ def scrape_oddsportal_surebets():
             logger.info("✅ 頁面載入完成")
         except TimeoutException:
             logger.error("❌ 頁面載入超時")
-            return get_real_surebet_data()
+            last_request_time = current_time
+            last_results = []
+            return []
         
         # 檢查是否有反爬蟲保護
         page_source = driver.page_source.lower()
-        if "cloudflare" in page_source or "ddos" in page_source or "bot" in page_source:
-            logger.warning("⚠️ 檢測到反爬蟲保護")
-            return get_real_surebet_data()
+        if any(keyword in page_source for keyword in ['cloudflare', 'ddos', 'bot detection', 'access denied', 'blocked']):
+            logger.warning("⚠️ 檢測到反爬蟲保護 (Selenium)")
+            last_request_time = current_time
+            last_results = []
+            return []
         
-        # 嘗試找到套利資料表格
-        table_found = False
-        for selector in ["table", ".table", "[data-cy='table']", ".odds-table"]:
-            try:
-                tables = driver.find_elements(By.CSS_SELECTOR, selector)
-                if tables:
-                    logger.info(f"✅ 找到表格: {len(tables)} 個")
-                    table_found = True
-                    break
-            except Exception as e:
-                logger.debug(f"選擇器 {selector} 失敗: {e}")
-                continue
+        # 嘗試解析套利資料
+        bets = parse_selenium_data(driver)
         
-        if not table_found:
-            logger.warning("⚠️ 未找到資料表格")
-            return get_real_surebet_data()
+        if not bets:
+            logger.info("❌ 未找到套利資料")
+            last_request_time = current_time
+            last_results = []
+            return []
         
-        # 如果找到表格但無法解析具體資料，返回真實資料
-        logger.info("📊 網站結構複雜，返回真實套利資料")
-        return get_real_surebet_data()
+        logger.info(f"✅ 成功爬取 {len(bets)} 筆套利資料")
+        last_request_time = current_time
+        last_results = bets
+        return bets
         
     except WebDriverException as e:
         logger.error(f"❌ WebDriver 錯誤: {e}")
-        return get_real_surebet_data()
+        last_request_time = current_time
+        last_results = []
+        return []
     except TimeoutException:
         logger.error("❌ 頁面載入超時")
-        return get_real_surebet_data()
+        last_request_time = current_time
+        last_results = []
+        return []
     except Exception as e:
         logger.error(f"❌ 爬蟲過程發生錯誤: {e}")
-        return get_real_surebet_data()
+        last_request_time = current_time
+        last_results = []
+        return []
         
     finally:
         try:
@@ -196,159 +242,65 @@ def scrape_oddsportal_surebets():
         except Exception as e:
             logger.error(f"❌ 關閉 WebDriver 時發生錯誤: {e}")
 
-def get_real_surebet_data():
-    """
-    獲取真實的套利資料（基於真實比賽和合理的賠率）
-    """
-    logger.info("🎯 生成基於真實比賽的套利資料...")
-    
-    # 真實即將進行的比賽
-    real_matches = [
-        {
-            "sport": "Soccer",
-            "league": "Premier League",
-            "home_team": "Arsenal",
-            "away_team": "Manchester City",
-            "bookmaker_1": "Pinnacle",
-            "bookmaker_2": "Bet365",
-            "odds_1": 2.15,
-            "odds_2": 1.85,
-            "roi": 3.2
-        },
-        {
-            "sport": "Basketball",
-            "league": "NBA",
-            "home_team": "Boston Celtics",
-            "away_team": "Miami Heat",
-            "bookmaker_1": "Betfair",
-            "bookmaker_2": "William Hill",
-            "odds_1": 1.90,
-            "odds_2": 2.10,
-            "roi": 2.8
-        },
-        {
-            "sport": "Tennis",
-            "league": "ATP Masters",
-            "home_team": "Carlos Alcaraz",
-            "away_team": "Novak Djokovic",
-            "bookmaker_1": "Unibet",
-            "bookmaker_2": "Betway",
-            "odds_1": 1.75,
-            "odds_2": 2.25,
-            "roi": 4.1
-        },
-        {
-            "sport": "Volleyball",
-            "league": "FIVB World Championship",
-            "home_team": "Brazil",
-            "away_team": "Poland",
-            "bookmaker_1": "Bwin",
-            "bookmaker_2": "888sport",
-            "odds_1": 1.80,
-            "odds_2": 2.20,
-            "roi": 3.5
-        },
-        {
-            "sport": "Football",
-            "league": "NFL",
-            "home_team": "Kansas City Chiefs",
-            "away_team": "Buffalo Bills",
-            "bookmaker_1": "DraftKings",
-            "bookmaker_2": "FanDuel",
-            "odds_1": 1.95,
-            "odds_2": 2.05,
-            "roi": 2.9
-        }
-    ]
-    
+def parse_selenium_data(driver):
+    """使用 Selenium 解析套利資料"""
     bets = []
     
-    # 隨機選擇 2-4 個比賽
-    selected_matches = random.sample(real_matches, random.randint(2, 4))
-    
-    for match in selected_matches:
-        # 生成合理的比賽時間（1-72小時內）
-        hours_offset = random.randint(1, 72)
-        future_time = datetime.now() + timedelta(hours=hours_offset)
-        match_time = future_time.strftime("%Y-%m-%d %H:%M")
-        
-        # 計算投注金額
-        odds_1 = match["odds_1"]
-        odds_2 = match["odds_2"]
-        stake_1, stake_2 = calculate_stakes(odds_1, odds_2)
-        
-        # 添加小幅隨機變化使每次結果略有不同
-        roi_variation = random.uniform(-0.3, 0.3)
-        actual_roi = max(2.0, match["roi"] + roi_variation)
-        
-        bet_data = {
-            "sport": match["sport"],
-            "league": match["league"],
-            "home_team": match["home_team"],
-            "away_team": match["away_team"],
-            "match_time": match_time,
-            "roi": round(actual_roi, 1),
-            "profit": round(400 * (actual_roi / 100), 2),
-            "url": "https://www.oddsportal.com/sure-bets/",
-            "bets": [
-                {
-                    "bookmaker": match["bookmaker_1"],
-                    "odds": f"{odds_1:.2f}",
-                    "stake": stake_1
-                },
-                {
-                    "bookmaker": match["bookmaker_2"],
-                    "odds": f"{odds_2:.2f}",
-                    "stake": stake_2
-                }
-            ]
-        }
-        
-        bets.append(bet_data)
-    
-    # 按ROI排序
-    bets.sort(key=lambda x: x['roi'], reverse=True)
-    
-    # 更新緩存
-    global last_request_time, last_results
-    last_request_time = time.time()
-    last_results = bets
-    
-    logger.info(f"✅ 生成了 {len(bets)} 筆真實套利機會")
-    return bets
-
-def calculate_stakes(odds_1, odds_2, total_stake=400):
-    """計算投注金額"""
     try:
-        # 使用套利公式計算
-        implied_prob_1 = 1 / odds_1
-        implied_prob_2 = 1 / odds_2
-        total_prob = implied_prob_1 + implied_prob_2
+        # 嘗試找到套利資料表格
+        # 這裡需要根據實際的網站結構來調整選擇器
+        possible_selectors = [
+            "table.table-main",
+            "[data-cy='table']",
+            ".odds-table",
+            ".surebet-table",
+            "table",
+            ".table"
+        ]
         
-        # 確保總概率小於1（套利條件）
-        if total_prob >= 1:
-            logger.warning(f"⚠️ 賠率不符合套利條件: {odds_1}, {odds_2}")
-            # 調整賠率使其符合套利條件
-            odds_1 = odds_1 * 1.05
-            odds_2 = odds_2 * 1.05
-            implied_prob_1 = 1 / odds_1
-            implied_prob_2 = 1 / odds_2
-            total_prob = implied_prob_1 + implied_prob_2
+        table_elements = []
+        for selector in possible_selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    table_elements.extend(elements)
+                    logger.info(f"✅ 找到表格元素: {selector}")
+                    break
+            except Exception as e:
+                logger.debug(f"選擇器 {selector} 失敗: {e}")
+                continue
         
-        stake_1 = round((implied_prob_1 / total_prob) * total_stake, 2)
-        stake_2 = round((implied_prob_2 / total_prob) * total_stake, 2)
+        if not table_elements:
+            logger.warning("⚠️ 未找到資料表格")
+            return []
         
-        # 確保總投注額等於預期
-        if stake_1 + stake_2 != total_stake:
-            stake_2 = total_stake - stake_1
-            stake_2 = round(stake_2, 2)
+        # 嘗試解析表格資料
+        for table in table_elements:
+            try:
+                rows = table.find_elements(By.TAG_NAME, "tr")
+                for row in rows:
+                    match_data = extract_selenium_match_data(row)
+                    if match_data:
+                        bets.append(match_data)
+            except Exception as e:
+                logger.debug(f"解析表格時發生錯誤: {e}")
+                continue
         
-        return stake_1, stake_2
+        return bets
         
-    except (ZeroDivisionError, ValueError) as e:
-        logger.error(f"❌ 計算投注金額時發生錯誤: {e}")
-        # 如果計算失敗，使用簡單的平均分配
-        return round(total_stake / 2, 2), round(total_stake / 2, 2)
+    except Exception as e:
+        logger.error(f"❌ 使用 Selenium 解析資料時發生錯誤: {e}")
+        return []
+
+def extract_selenium_match_data(row_element):
+    """從表格行中提取比賽資料"""
+    try:
+        # 這裡需要根據實際的HTML結構來實現
+        # 目前返回 None 表示無法提取
+        return None
+    except Exception as e:
+        logger.debug(f"提取比賽資料時發生錯誤: {e}")
+        return None
 
 def clear_cache():
     """清除緩存"""
@@ -369,12 +321,11 @@ def test_scraper():
     if results:
         logger.info(f"\n📋 測試結果: 找到 {len(results)} 筆套利機會")
         for i, bet in enumerate(results):
-            logger.info(f"\n{i+1}. {bet['sport']} - {bet['league']}")
-            logger.info(f"   比賽: {bet['home_team']} vs {bet['away_team']}")
-            logger.info(f"   時間: {bet['match_time']}")
-            logger.info(f"   ROI: {bet['roi']}%")
-            logger.info(f"   投注: {bet['bets'][0]['bookmaker']} ${bet['bets'][0]['stake']} + {bet['bets'][1]['bookmaker']} ${bet['bets'][1]['stake']}")
-            logger.info(f"   利潤: ${bet['profit']}")
+            logger.info(f"\n{i+1}. {bet.get('sport', 'Unknown')} - {bet.get('league', 'Unknown')}")
+            logger.info(f"   比賽: {bet.get('home_team', 'Unknown')} vs {bet.get('away_team', 'Unknown')}")
+            logger.info(f"   時間: {bet.get('match_time', 'Unknown')}")
+            logger.info(f"   ROI: {bet.get('roi', 'Unknown')}%")
+            logger.info(f"   利潤: ${bet.get('profit', 'Unknown')}")
     else:
         logger.info("❌ 沒有找到套利機會")
     
