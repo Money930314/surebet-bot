@@ -7,6 +7,8 @@ import asyncio
 import os
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+import signal
+import time
 
 # 配置 logging
 logging.basicConfig(
@@ -32,6 +34,7 @@ app = Flask(__name__)
 
 # 全局 Telegram 應用實例
 telegram_app = None
+is_processing = False  # 防止重複處理
 
 @app.route('/')
 def home():
@@ -58,8 +61,19 @@ def health_check():
     return {
         "status": "running",
         "timestamp": datetime.now().isoformat(),
-        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "is_processing": is_processing
     }
+
+@app.route('/clear-cache')
+def clear_cache():
+    """清除爬蟲緩存"""
+    try:
+        from scraper import clear_cache
+        clear_cache()
+        return "✅ 緩存已清除"
+    except Exception as e:
+        return f"❌ 清除緩存失敗: {str(e)}"
 
 @app.route('/stop-bot')
 def stop_bot():
@@ -77,6 +91,14 @@ def stop_bot():
 
 def run_scraper_and_notify():
     """執行爬蟲並發送通知"""
+    global is_processing
+    
+    if is_processing:
+        logger.warning("⚠️ 正在處理中，跳過重複請求")
+        return "⚠️ 正在處理中，請稍候..."
+    
+    is_processing = True
+    
     try:
         logger.info("📥 正在導入爬蟲模組...")
         from scraper import scrape_oddsportal_surebets
@@ -89,7 +111,7 @@ def run_scraper_and_notify():
 
         if not surebet_data:
             logger.warning("⚠️ 沒有找到套利機會")
-            error_message = "❌ 目前沒有找到符合條件的套利機會\n\n條件設定：\n- ROI ≥ 3%\n- 運動類型：足球、籃球、網球、排球、美式足球"
+            error_message = "❌ 目前沒有找到符合條件的套利機會\n\n💡 可能原因：\n• 市場波動較小\n• 賠率已調整\n• 網站暫時限制訪問\n\n🔄 建議15分鐘後再試"
             send_message_simple(error_message)
             return error_message
 
@@ -114,96 +136,17 @@ def run_scraper_and_notify():
         error_msg = f"❌ 執行錯誤: {str(e)}"
         logger.error(error_msg)
         return error_msg
+    finally:
+        is_processing = False
 
 # Telegram 指令處理器
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 /start 指令"""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    logger.info(f"💬 收到 /start 指令，用戶: {user_id}")
-    
-    # 檢查是否為授權用戶
-    if str(user_id) != TELEGRAM_CHAT_ID:
-        logger.warning(f"⚠️ 未授權用戶嘗試使用: {user_id}")
-        await context.bot.send_message(
-            chat_id=chat_id, 
-            text="❌ 抱歉，您沒有使用權限"
-        )
-        return
-    
-    welcome_message = """
-🤖 **歡迎使用 Surebet Bot！**
-
-📋 **指令列表：**
-• `$$$` - 搜尋套利機會
-• `/help` - 顯示使用說明
-• `/start` - 顯示歡迎訊息
-
-⚙️ **搜尋條件：**
-• ROI ≥ 3%
-• 運動類型：足球、籃球、網球、排球、美式足球
-• 總投注額：$400
-
-💡 **提醒：**
-套利機會稍縱即逝，建議盡快下注！
-
-🚀 **開始使用：**
-直接發送 `$$$` 開始搜尋套利機會
-"""
-    await context.bot.send_message(chat_id=chat_id, text=welcome_message)
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理 /help 指令"""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    logger.info(f"💬 收到 /help 指令，用戶: {user_id}")
-    
-    # 檢查是否為授權用戶
-    if str(user_id) != TELEGRAM_CHAT_ID:
-        logger.warning(f"⚠️ 未授權用戶嘗試使用: {user_id}")
-        await context.bot.send_message(
-            chat_id=chat_id, 
-            text="❌ 抱歉，您沒有使用權限"
-        )
-        return
-    
-    help_message = """
-🤖 **Surebet Bot 使用說明**
-
-📋 **指令列表：**
-• `$$$` - 搜尋套利機會
-• `/help` - 顯示此說明
-• `/start` - 顯示歡迎訊息
-
-⚙️ **搜尋條件：**
-• ROI ≥ 3%
-• 運動類型：足球、籃球、網球、排球、美式足球
-• 總投注額：$400
-
-💰 **套利原理：**
-利用不同博彩公司的賠率差異，無論比賽結果如何都能獲利
-
-💡 **使用提醒：**
-1. 套利機會稍縱即逝，建議盡快下注
-2. 確保在各平台都有足夠資金
-3. 注意各平台的投注限額
-
-🚀 **快速開始：**
-發送 `$$$` 立即搜尋套利機會
-"""
-    await context.bot.send_message(chat_id=chat_id, text=help_message)
-
-# Telegram 訊息處理器
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理 Telegram 訊息"""
     try:
-        text = update.message.text.strip()
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         
-        logger.info(f"💬 收到訊息: '{text}' 來自用戶: {user_id}")
+        logger.info(f"💬 收到 /start 指令，用戶: {user_id}")
         
         # 檢查是否為授權用戶
         if str(user_id) != TELEGRAM_CHAT_ID:
@@ -214,105 +157,126 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        if text == "$$$":
-            logger.info("💬 收到 Telegram 指令 $$$，開始執行...")
-            
-            # 發送處理中訊息
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="🔄 正在搜尋套利機會，請稍候..."
-            )
-            
-            # 執行爬蟲
-            reply = run_scraper_and_notify()
-            
-            # 如果是透過 run_scraper_and_notify 已經發送過訊息，則不再重複發送
-            if "推播成功" not in reply:
-                await context.bot.send_message(chat_id=chat_id, text=reply)
-                
-        elif text.lower() in ["help", "幫助"]:
-            await help_command(update, context)
-        else:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❓ 不認識的指令\n\n📋 可用指令：\n• `$$$` - 搜尋套利機會\n• `/help` - 查看詳細說明\n• `/start` - 顯示歡迎訊息"
-            )
-            
+        welcome_message = """🤖 **歡迎使用 Surebet Bot！**
+
+📋 **指令列表：**
+• `$$$` - 搜尋套利機會
+• `/help` - 顯示使用說明
+• `/start` - 顯示歡迎訊息
+• `/clear` - 清除快取資料
+
+⚙️ **搜尋條件：**
+• ROI ≥ 2%
+• 運動類型：足球、籃球、網球、排球、美式足球
+• 總投注額：$400
+
+💡 **提醒：**
+• 套利機會稍縱即逝，建議盡快下注
+• 資料每5分鐘更新一次
+• 確保各平台帳戶有足夠資金
+
+🚀 **開始使用：**
+直接發送 `$$$` 開始搜尋套利機會"""
+        
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=welcome_message,
+            parse_mode='Markdown'
+        )
+        
     except Exception as e:
-        logger.error(f"❌ 處理訊息時發生錯誤: {e}")
+        logger.error(f"❌ 處理 /start 指令時發生錯誤: {e}")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="❌ 處理訊息時發生錯誤，請稍後再試"
+            text="❌ 指令處理失敗，請稍後再試"
         )
 
-def setup_telegram_bot():
-    """設定 Telegram 機器人"""
-    global telegram_app
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理 /help 指令"""
     try:
-        # 創建應用程式
-        telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
         
-        # 添加指令處理器
-        telegram_app.add_handler(CommandHandler("start", start_command))
-        telegram_app.add_handler(CommandHandler("help", help_command))
+        logger.info(f"💬 收到 /help 指令，用戶: {user_id}")
         
-        # 添加訊息處理器
-        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        # 檢查是否為授權用戶
+        if str(user_id) != TELEGRAM_CHAT_ID:
+            logger.warning(f"⚠️ 未授權用戶嘗試使用: {user_id}")
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="❌ 抱歉，您沒有使用權限"
+            )
+            return
         
-        logger.info("🤖 Telegram Bot 設定完成")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Telegram Bot 設定失敗: {e}")
-        return False
+        help_message = """🤖 **Surebet Bot 使用說明**
 
-def flask_server():
-    """Flask 伺服器函數"""
-    logger.info("🚀 Flask 伺服器啟動中...")
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+📋 **指令列表：**
+• `$$$` - 搜尋套利機會
+• `/help` - 顯示此說明
+• `/start` - 顯示歡迎訊息
+• `/clear` - 清除快取資料
 
-# 🔃 啟動應用
-if __name__ == '__main__':
-    # 設定 Telegram Bot
-    if not setup_telegram_bot():
-        logger.error("❌ 無法設定 Telegram Bot，程式退出")
-        sys.exit(1)
-    
-    # 在子線程中啟動 Flask
-    flask_thread = Thread(target=flask_server, daemon=True)
-    flask_thread.start()
-    
-    logger.info("🤖 Telegram Bot 監聽器啟動中...")
-    
-    # 在主線程中運行 Telegram Bot
-    try:
-        # 修復衝突：添加更多配置選項
-        telegram_app.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            timeout=30,  # 增加超時時間
-            bootstrap_retries=5,  # 增加重試次數
-            read_timeout=20,  # 讀取超時
-            write_timeout=20,  # 寫入超時
-            connect_timeout=20,  # 連接超時
-            pool_timeout=20  # 池超時
+⚙️ **搜尋條件：**
+• ROI ≥ 2%
+• 運動類型：足球、籃球、網球、排球、美式足球
+• 總投注額：$400
+
+💰 **套利原理：**
+利用不同博彩公司的賠率差異，無論比賽結果如何都能獲利
+
+💡 **使用提醒：**
+1. 套利機會稍縱即逝，建議盡快下注
+2. 確保在各平台都有足夠資金
+3. 注意各平台的投注限額
+4. 資料每5分鐘自動更新
+
+🔄 **快取機制：**
+• 為避免頻繁請求，系統會快取5分鐘
+• 如需強制更新，請使用 `/clear` 清除快取
+
+🚀 **快速開始：**
+發送 `$$$` 立即搜尋套利機會"""
+        
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=help_message,
+            parse_mode='Markdown'
         )
-    except KeyboardInterrupt:
-        logger.info("👋 程式被使用者中斷")
+        
     except Exception as e:
-        logger.error(f"❌ Telegram Bot 運行錯誤: {e}")
-        # 如果是衝突錯誤，嘗試重新啟動
-        if "Conflict" in str(e):
-            logger.info("🔄 偵測到衝突，正在重新啟動...")
-            import time
-            time.sleep(5)  # 等待 5 秒後重新啟動
-            try:
-                telegram_app.run_polling(
-                    allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True
-                )
-            except Exception as restart_error:
-                logger.error(f"❌ 重新啟動失敗: {restart_error}")
-    finally:
-        logger.info("🔚 程式結束")
+        logger.error(f"❌ 處理 /help 指令時發生錯誤: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ 指令處理失敗，請稍後再試"
+        )
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """處理 /clear 指令"""
+    try:
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        
+        logger.info(f"💬 收到 /clear 指令，用戶: {user_id}")
+        
+        # 檢查是否為授權用戶
+        if str(user_id) != TELEGRAM_CHAT_ID:
+            logger.warning(f"⚠️ 未授權用戶嘗試使用: {user_id}")
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="❌ 抱歉，您沒有使用權限"
+            )
+            return
+        
+        from scraper import clear_cache
+        clear_cache()
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="✅ 緩存已清除，您可以重新發送 $$$ 取得最新套利資訊"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ 處理 /clear 指令時發生錯誤: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ 指令處理失敗，請稍後再試"
+        )
