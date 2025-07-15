@@ -3,8 +3,10 @@ import sys
 import logging
 from datetime import datetime
 from threading import Thread
+import asyncio
 import os
-from telegram.ext import Updater, MessageHandler, Filters
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # 配置 logging
 logging.basicConfig(
@@ -96,8 +98,8 @@ def run_scraper_and_notify():
         logger.error(error_msg)
         return error_msg
 
-# Telegram 訊息處理器 (v13.x 版本)
-def handle_message(update, context):
+# Telegram 訊息處理器
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """處理 Telegram 訊息"""
     try:
         text = update.message.text.strip()
@@ -109,7 +111,7 @@ def handle_message(update, context):
         # 檢查是否為授權用戶
         if str(user_id) != TELEGRAM_CHAT_ID:
             logger.warning(f"⚠️ 未授權用戶嘗試使用: {user_id}")
-            context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=chat_id, 
                 text="❌ 抱歉，您沒有使用權限"
             )
@@ -119,7 +121,7 @@ def handle_message(update, context):
             logger.info("💬 收到 Telegram 指令 $$$，開始執行...")
             
             # 發送處理中訊息
-            context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=chat_id,
                 text="🔄 正在搜尋套利機會，請稍候..."
             )
@@ -129,7 +131,7 @@ def handle_message(update, context):
             
             # 如果是透過 run_scraper_and_notify 已經發送過訊息，則不再重複發送
             if "推播成功" not in reply:
-                context.bot.send_message(chat_id=chat_id, text=reply)
+                await context.bot.send_message(chat_id=chat_id, text=reply)
                 
         elif text.lower() in ["/start", "/help", "help", "幫助"]:
             help_message = """
@@ -147,47 +149,50 @@ def handle_message(update, context):
 💡 **提醒：**
 套利機會稍縱即逝，建議盡快下注！
 """
-            context.bot.send_message(chat_id=chat_id, text=help_message)
+            await context.bot.send_message(chat_id=chat_id, text=help_message)
         else:
-            context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=chat_id,
                 text="❓ 不認識的指令，請發送 `$$$` 搜尋套利機會，或 `/help` 查看說明"
             )
             
     except Exception as e:
         logger.error(f"❌ 處理訊息時發生錯誤: {e}")
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="❌ 處理訊息時發生錯誤，請稍後再試"
         )
 
-def run_telegram_bot():
-    """運行 Telegram 機器人 (v13.x 版本)"""
+async def run_telegram_bot():
+    """運行 Telegram 機器人"""
     try:
-        # 創建 Updater 和 Dispatcher
-        updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
-        dispatcher = updater.dispatcher
+        # 創建應用程式
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         
         # 添加訊息處理器
-        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        logger.info("🤖 Telegram Bot 啟動中，等待 $$$ 指令...")
+        logger.info("🤖 Telegram Bot 啟動中，等待 $$ 指令...")
         
-        # 開始 polling
-        updater.start_polling(drop_pending_updates=True)
+        # 使用 run_polling 方法，這是 v20.x 的推薦方式
+        await application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
         
         logger.info("✅ Telegram Bot 已啟動，監聽訊息中...")
         
-        # 保持運行
-        updater.idle()
-        
     except Exception as e:
         logger.error(f"❌ Telegram Bot 啟動失敗: {e}")
+        raise e
 
 def telegram_listener():
     """Telegram 監聽器包裝函數"""
     try:
-        run_telegram_bot()
+        # 為 Telegram bot 創建新的事件循環
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(run_telegram_bot())
     except Exception as e:
         logger.error(f"❌ Telegram 監聽器錯誤: {e}")
 
