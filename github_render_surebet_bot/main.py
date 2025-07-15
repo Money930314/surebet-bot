@@ -75,7 +75,7 @@ def run_scraper_and_notify():
 
         if not surebet_data:
             logger.warning("⚠️ 沒有找到套利機會")
-            error_message = "❌ 目前沒有找到符合條件的套利機會\n\n條件設定：\n- ROI ≥ 10%\n- 運動類型：足球、籃球、網球、排球、美式足球"
+            error_message = "❌ 目前沒有找到符合條件的套利機會\n\n條件設定：\n- ROI ≥ 3%\n- 運動類型：足球、籃球、網球、排球、美式足球"
             send_message_simple(error_message)
             return error_message
 
@@ -145,7 +145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • `/help` - 顯示此說明
 
 ⚙️ **搜尋條件：**
-• ROI ≥ 10%
+• ROI ≥ 3%
 • 運動類型：足球、籃球、網球、排球、美式足球
 • 總投注額：$400
 
