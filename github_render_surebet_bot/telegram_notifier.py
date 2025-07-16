@@ -143,3 +143,17 @@ def start_bot_polling():
 
     logger.info("🚀 Telegram Bot polling 開始…")
     app.run_polling(stop_signals=None)
+
+
+# telegram_notifier.py 最後，加入 error handler
+from telegram.error import Conflict
+
+async def _error_handler(update, context):
+    if isinstance(context.error, Conflict):
+        # 只記 debug，不丟整串 traceback
+        logger.debug("忽略 Telegram 409 Conflict（多重 polling）")
+    else:
+        logger.exception("Telegram Bot error", exc_info=context.error)
+
+app.add_error_handler(_error_handler)
+
