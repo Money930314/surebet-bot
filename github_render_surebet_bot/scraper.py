@@ -1,217 +1,149 @@
+"""scraper.py
+改版：改用 The Odds API 取代爬蟲，並計算 surebet（雙邊賠率套利）。
+"""
+import os
 import time
-import random
 import logging
-from datetime import datetime
+from typing import List, Dict, Any
 
 import requests
-from requests.exceptions import HTTPError
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from dotenv import load_dotenv
 
-# 日誌設定
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# --------------------------------------------------
+# 設定與常數
+# --------------------------------------------------
+load_dotenv()
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# 緩存設定
-CACHE_DURATION = 60  # seconds
-data_cache = {
-    "time": None,
-    "results": None
-}
+API_KEY = os.getenv("THE_ODDS_API_KEY", "e9c7f8945b8fcab5d904fc7f6ef6c2da")
+BASE_URL = "https://api.the-odds-api.com/v4"
 
-def create_webdriver():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    )
-    driver = webdriver.Chrome(options=chrome_options)
-    driver.execute_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-    return driver
+# 對套利玩家相對友善的莊家（bookmaker key 取自 The Odds API 文件）
+FRIENDLY_BOOKMAKERS = [
+    "pinnacle",       # Pinnacle Sports
+    "betfair_ex",    # Betfair Exchange
+    "smarkets"       # Smarkets Exchange
+]
 
+# 只抓 2-way moneyline 市場，因為三向 (1X2) 計算方式不同，可以之後擴充
+MARKET_KEY = "h2h"  # head-to-head / moneyline
 
-def extract_match_info(container):
+# 只抓最常見的幾個運動，可再自行擴充
+DEFAULT_SPORTS = [
+    "basketball_nba",
+    "basketball_euroleague",
+    "soccer_epl",
+    "tennis_atp",
+]
+
+# Cache 設定（秒）
+CACHE_SECONDS = 30
+_cache: Dict[str, Any] = {"time": 0, "results": []}
+
+def _call_odds_api(endpoint: str, params: Dict[str, Any]) -> Any:
+    """包裝 GET 請求，處理錯誤與日誌"""
+    url = f"{BASE_URL}{endpoint}"
+    params["apiKey"] = API_KEY
     try:
-        cells = container.find_all("td")
-        if len(cells) < 7:
-            return None
-        match_time = cells[0].get_text(strip=True)
-        teams = cells[1].get_text(strip=True).split(" - ")
-        if len(teams) != 2:
-            return None
-        home, away = teams
-        bm1, odd1 = cells[2].get_text(strip=True), cells[3].get_text(strip=True)
-        bm2, odd2 = cells[4].get_text(strip=True), cells[5].get_text(strip=True)
-        roi_text = cells[6].get_text(strip=True).rstrip("%")
-        roi = float(roi_text)
-        total_stake = 100
-        profit = total_stake * roi / 100.0
-        bets = [
-            {"bookmaker": bm1, "odds": odd1, "stake": round(total_stake / 2, 2)},
-            {"bookmaker": bm2, "odds": odd2, "stake": round(total_stake / 2, 2)},
-        ]
-        link = container.find("a")
-        url = link["href"] if link and link.has_attr("href") else None
-        return {
-            "sport": "Unknown",
-            "league": "Unknown",
-            "home_team": home,
-            "away_team": away,
-            "match_time": match_time,
-            "bets": bets,
-            "roi": roi,
-            "profit": profit,
-            "url": url,
-        }
-    except Exception as e:
-        logger.debug(f"提取比賽資訊時發生錯誤: {e}")
-        return None
-
-
-def scrape_with_requests():
-    """
-    使用 requests 爬取，若遇到 429 Too Many Requests，直接返回空列表以便使用 Selenium
-    """
-    url = "https://www.oddsportal.com/sure-bets/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer": "https://www.oddsportal.com/",
-    }
-    try:
-        resp = requests.get(url, timeout=15, headers=headers)
-        if resp.status_code == 429:
-            logger.warning("❌ requests 爬取失敗: 429 Too Many Requests，切換到 Selenium 模式")
-            return []
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select("table tr")
-        results = []
-        for row in rows:
-            info = extract_match_info(row)
-            if info:
-                results.append(info)
-        return results
-    except HTTPError as e:
-        if e.response is not None and e.response.status_code == 429:
-            logger.warning("❌ HTTPError 429，切換到 Selenium 模式")
-            return []
-        logger.warning(f"❌ requests 爬取失敗: {e}")
-        return []
-    except Exception as e:
-        logger.warning(f"❌ requests 爬取失敗: {e}")
-        return []
-
-
-def extract_selenium_match_data(row_element):
-    try:
-        cells = row_element.find_elements(By.TAG_NAME, "td")
-        if len(cells) < 7:
-            return None
-        match_time = cells[0].text.strip()
-        teams = cells[1].text.strip().split(" - ")
-        if len(teams) != 2:
-            return None
-        home, away = teams
-        bm1, odd1 = cells[2].text.strip(), cells[3].text.strip()
-        bm2, odd2 = cells[4].text.strip(), cells[5].text.strip()
-        roi_text = cells[6].text.strip().rstrip("%")
-        roi = float(roi_text)
-        total_stake = 100
-        profit = total_stake * roi / 100.0
-        bets = [
-            {"bookmaker": bm1, "odds": odd1, "stake": round(total_stake / 2, 2)},
-            {"bookmaker": bm2, "odds": odd2, "stake": round(total_stake / 2, 2)},
-        ]
-        try:
-            link = row_element.find_element(By.TAG_NAME, "a")
-            url = link.get_attribute("href")
-        except:
-            url = None
-        return {
-            "sport": "Unknown",
-            "league": "Unknown",
-            "home_team": home,
-            "away_team": away,
-            "match_time": match_time,
-            "bets": bets,
-            "roi": roi,
-            "profit": profit,
-            "url": url,
-        }
-    except Exception as e:
-        logger.debug(f"提取比賽資料時發生錯誤: {e}")
+        return resp.json()
+    except requests.HTTPError as e:
+        logger.error(f"HTTPError {e.response.status_code}: {e.response.text[:200]}")
+        return None
+    except requests.RequestException as e:
+        logger.error(f"RequestException: {e}")
         return None
 
+def _calc_two_way_surebet(odds_a: float, odds_b: float) -> float:
+    """return ROI 百分比 (正值代表有 surebet)"""
+    inv_sum = 1 / odds_a + 1 / odds_b
+    if inv_sum >= 1:
+        return -1  # 無套利
+    roi = (1 / inv_sum - 1) * 100
+    return round(roi, 2)
 
-def parse_selenium_data(driver):
-    bets = []
-    selectors = ["table.table-main", "[data-cy='table']", ".odds-table", ".surebet-table", "table"]
-    for sel in selectors:
-        try:
-            tables = driver.find_elements(By.CSS_SELECTOR, sel)
-            if tables:
-                for table in tables:
-                    for row in table.find_elements(By.TAG_NAME, "tr"):
-                        data = extract_selenium_match_data(row)
-                        if data:
-                            bets.append(data)
-                if bets:
-                    return bets
-        except Exception:
-            continue
-    return bets
+def _stake_split(total: float, odds_a: float, odds_b: float) -> (float, float):
+    inv_sum = 1 / odds_a + 1 / odds_b
+    stake_a = total / (odds_a * inv_sum)
+    stake_b = total / (odds_b * inv_sum)
+    return round(stake_a, 2), round(stake_b, 2)
 
+def fetch_surebets(sports: List[str] = None, min_roi: float = 0.5) -> List[Dict[str, Any]]:
+    """向 The Odds API 取資料並回傳 surebet list"""
+    if sports is None:
+        sports = DEFAULT_SPORTS
 
-def scrape_oddsportal_surebets():
-    """
-    主流程：先檢查緩存，再用 requests，最後用 Selenium
-    """
+    # 使用簡易快取避免超過配額
     now = time.time()
-    if data_cache["time"] and data_cache["results"] is not None and now - data_cache["time"] < CACHE_DURATION:
-        return data_cache["results"]
+    if now - _cache["time"] < CACHE_SECONDS:
+        return _cache["results"]
 
-    # 1) 試用 requests
-    results = scrape_with_requests()
-    if results:
-        data_cache["time"] = now
-        data_cache["results"] = results
-        return results
+    surebets: List[Dict[str, Any]] = []
+    for sport in sports:
+        params = {
+            "regions": "eu",  # 歐洲盤口時區
+            "markets": MARKET_KEY,
+            "oddsFormat": "decimal",
+            "bookmakers": ",".join(FRIENDLY_BOOKMAKERS),
+        }
+        data = _call_odds_api(f"/sports/{sport}/odds", params)
+        if not data:
+            continue
 
-    # 2) Selenium fallback
-    driver = create_webdriver()
-    try:
-        driver.set_page_load_timeout(30)
-        driver.get("https://www.oddsportal.com/sure-bets/")
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(random.uniform(2, 4))
-        results = parse_selenium_data(driver)
-        data_cache["time"] = now
-        data_cache["results"] = results
-        return results
-    except Exception as e:
-        logger.error(f"❌ Selenium 爬取失敗: {e}")
-        return []
-    finally:
-        try:
-            driver.quit()
-        except:
-            pass
+        for event in data:
+            event_id = event.get("id")
+            commence_time = event.get("commence_time")
+            home, away = event.get("home_team"), event.get("away_team")
+            # 蒐集每個 outcome 在不同 bookmaker 的最佳賠率
+            best_odds: Dict[str, Dict[str, Any]] = {}
+            for bm in event.get("bookmakers", [])
+:
+                bm_key = bm.get("key")
+                bm_title = bm.get("title")
+                for market in bm.get("markets", []):
+                    if market.get("key") != MARKET_KEY:
+                        continue
+                    for outcome in market.get("outcomes", []):
+                        name = outcome.get("name")
+                        price = outcome.get("price")
+                        if name not in best_odds or price > best_odds[name]["price"]:
+                            best_odds[name] = {"price": price, "bookmaker": bm_title}
+            if len(best_odds) < 2:
+                continue  # 不是二選一市場
+            # 假設第一個是主隊，第二個是客隊
+            teams = list(best_odds.keys())
+            odds_a = best_odds[teams[0]]["price"]
+            odds_b = best_odds[teams[1]]["price"]
+            roi = _calc_two_way_surebet(odds_a, odds_b)
+            if roi < min_roi:
+                continue
+            stake_a, stake_b = _stake_split(100, odds_a, odds_b)
+            surebets.append({
+                "sport": event.get("sport_title", sport),
+                "league": event.get("sport_key", sport),
+                "home_team": home,
+                "away_team": away,
+                "match_time": commence_time,
+                "bets": [
+                    {"bookmaker": best_odds[teams[0]]["bookmaker"], "odds": odds_a, "stake": stake_a},
+                    {"bookmaker": best_odds[teams[1]]["bookmaker"], "odds": odds_b, "stake": stake_b},
+                ],
+                "roi": roi,
+                "profit": round(100 * roi / 100, 2),
+                "url": f"https://the-odds-api.com/event/{event_id}" if event_id else None,
+            })
+    # 依 ROI 排序
+    surebets.sort(key=lambda x: x["roi"], reverse=True)
+    # 更新 cache
+    _cache["time"] = now
+    _cache["results"] = surebets
+    return surebets
 
-
+# 允許 CLI 測試
 if __name__ == "__main__":
-    data = scrape_oddsportal_surebets()
-    logger.info(f"測試結束，共抓到 {len(data)} 筆資料")
-    for d in data:
-        logger.info(d)
+    bets = fetch_surebets()
+    logger.info("抓到 %d 筆 surebet", len(bets))
+    if bets:
+        logger.info(bets[0])
