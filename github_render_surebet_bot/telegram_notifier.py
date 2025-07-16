@@ -1,12 +1,8 @@
 """telegram_notifier.py – Telegram Bot for SureBet Radar.
 
-功能概述：
-* /start     → 歡迎訊息
-* /help      → 使用說明
-* /scan      → 等同 /roi
-* /roi [sport] [stake]  → 查詢最高 ROI（明、後兩天賽事），可指定運動與投注總額
-* /bookies   → 顯示友善莊家
-* /roibasketball 等「黏在一起」的快速指令亦支援
+重點更新：
+* /roi [sport] [stake] [days]  — 第 3 個參數可指定抓取「未來 N 天」(1‑60)，預設 2。
+* 快捷 /roisoccer 150 7 同樣支援。
 """
 import os
 import logging
@@ -18,19 +14,13 @@ from typing import Dict, Any, List
 
 import requests
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-from scraper import fetch_surebets, FRIENDLY_BOOKMAKERS, DEFAULT_SPORTS
+from scraper import fetch_surebets, FRIENDLY_BOOKMAKERS
 
 BOOKMAKER_URLS = {
     "pinnacle": "https://www.pinnacle.com/",
@@ -45,7 +35,10 @@ SPORT_ALIASES = {
     "soccer": "soccer_epl",
     "baseball": "baseball_mlb",
 }
+
 DEFAULT_STAKE = 100.0
+DEFAULT_DAYS = 2
+MAX_DAYS = 60
 
 # ---------- helpers ----------
 
@@ -76,17 +69,16 @@ def _fmt_match(match: Dict[str, Any]):
         lines.append(f"🔗 <a href='{escape(match['url'])}'>查看賽事詳情</a>")
     return "\n".join(lines)
 
-# ---------- core fetch & reply ----------
+# ---------- core fetch ----------
 
-def _resolve_sport(arg: str | None):
-    if not arg:
+def _resolve_sport(alias: str | None):
+    if not alias:
         return None
-    key = arg.lower()
-    return SPORT_ALIASES.get(key)
+    return SPORT_ALIASES.get(alias.lower())
 
-async def _reply_surebets(update: Update, sport_key: str | None, total_stake: float):
+async def _reply_surebets(update: Update, sport_key: str | None, stake: float, days: int):
     sports = [sport_key] if sport_key else None
-    bets = fetch_surebets(sports=sports, total_stake=total_stake)
+    bets = fetch_surebets(sports=sports, total_stake=stake, days_window=days)
     bets = bets[:5]
     if not bets:
         await update.message.reply_text("目前沒有符合條件的套利機會 🙇‍♂️")
@@ -111,29 +103,34 @@ async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ) + (
         "/start – 初始化歡迎訊息\n"
         "/help – 查看使用說明\n"
-        "/scan – 掃描最新 surebet (預設下注 100)\n"
-        "/roi [sport] [stake] – 查詢 surebet，可加運動與下注額\n"
+        "/scan – 掃描最新 surebet (預設下注 100, 2 天內賽事)\n"
+        "/roi [sport] [stake] [days] – 查詢 surebet，可加運動、下注額、天數 (1‑60)\n"
         "/bookies – 查看友善莊家清單\n\n"
-        "亦支援快捷： /roibasketball 200  等同  /roi basketball 200"
+        "亦支援快捷： /roibasketball 200 7  等同  /roi basketball 200 7"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def _cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _reply_surebets(update, None, DEFAULT_STAKE)
+    await _reply_surebets(update, None, DEFAULT_STAKE, DEFAULT_DAYS)
 
 async def _cmd_roi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    sport_arg = args[0] if args else None
+    sport_key = None
     stake = DEFAULT_STAKE
-    if args:
-        # if first arg numeric treat as stake
-        if args[0].isdigit():
-            stake = float(args[0])
-            sport_arg = None
-        elif len(args) >= 2 and args[1].isdigit():
-            stake = float(args[1])
-    sport_key = _resolve_sport(sport_arg)
-    await _reply_surebets(update, sport_key, stake)
+    days = DEFAULT_DAYS
+
+    # 解析參數
+    params = context.args
+    for p in params:
+        if p.isdigit():
+            val = int(p)
+            if 1 <= val <= MAX_DAYS and days == DEFAULT_DAYS:
+                days = val
+            else:
+                stake = float(val)
+        else:
+            sport_key = _resolve_sport(p)
+
+    await _reply_surebets(update, sport_key, stake, days)
 
 async def _cmd_bookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = "\n".join([f"• {b.title()}" for b in FRIENDLY_BOOKMAKERS])
@@ -142,17 +139,24 @@ async def _cmd_bookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lstrip("/")
     if text.lower().startswith("roi"):
-        # fast command: /roibasketball 150
-        cmd = text[3:]  # remove 'roi'
-        parts = cmd.split()
-        sport = parts[0] if parts and parts[0] else None
-        stake = float(parts[1]) if len(parts) > 1 and parts[1].isdigit() else DEFAULT_STAKE
-        sport_key = _resolve_sport(sport)
-        await _reply_surebets(update, sport_key, stake)
+        parts = text[3:].split()
+        sport = None
+        stake = DEFAULT_STAKE
+        days = DEFAULT_DAYS
+        for p in parts:
+            if p.isdigit():
+                v = int(p)
+                if 1 <= v <= MAX_DAYS and days == DEFAULT_DAYS:
+                    days = v
+                else:
+                    stake = float(v)
+            else:
+                sport = p
+        await _reply_surebets(update, _resolve_sport(sport), stake, days)
         return
     await update.message.reply_text("未支援的指令，請輸入 /help 查看。")
 
-# ---------- run polling ----------
+# ---------- polling ----------
 
 def start_bot_polling():
     if not BOT_TOKEN:
