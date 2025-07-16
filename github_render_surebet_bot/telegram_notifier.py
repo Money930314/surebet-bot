@@ -55,7 +55,7 @@ def _format_match_html(match: Dict[str, Any]) -> str:
     if match.get("url"):
         lines.append(f"🔗 <a href='{escape(match['url'])}'>查看賽事詳情</a>")
     return "
-".join(lines)
+".join
 
 # ------------------ Low‑level sender ------------------
 
