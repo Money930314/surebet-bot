@@ -107,7 +107,8 @@ def start_bot():
     )
 
     logger.info("🤖 Telegram Bot 開始運行 (polling)")
-    application.run_polling()
+    # 不在主線程中時，禁用信號處理
+    application.run_polling(stop_signals=[])
 
 
 if __name__ == "__main__":
