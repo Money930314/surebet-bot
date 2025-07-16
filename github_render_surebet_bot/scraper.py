@@ -1,3 +1,6 @@
+"""scraper.py
+改版：改用 The Odds API 取代爬蟲，並計算 surebet（雙邊賠率套利）。
+"""
 import os
 import time
 import logging
@@ -35,7 +38,6 @@ CACHE_SECONDS = 30
 _cache: Dict[str, Any] = {"time": 0, "results": []}
 
 def _call_odds_api(endpoint: str, params: Dict[str, Any]) -> Any:
-    """呼叫 The Odds API，統一錯誤處理"""
     url = f"{BASE_URL}{endpoint}"
     params["apiKey"] = API_KEY
     try:
@@ -43,7 +45,6 @@ def _call_odds_api(endpoint: str, params: Dict[str, Any]) -> Any:
         resp.raise_for_status()
         return resp.json()
     except requests.HTTPError as e:
-        # 常見 UNKNOWN_SPORT 只記 debug，不終止流程
         if e.response.status_code == 404:
             logger.debug("%s %s", endpoint, e.response.json().get("message"))
         else:
@@ -66,14 +67,11 @@ def _stake_split(total: float, odds_a: float, odds_b: float):
     return round(stake_a, 2), round(stake_b, 2)
 
 def fetch_surebets(sports: List[str] | None = None, min_roi: float = 0.5):
-    """回傳符合 ROI 的 surebet list"""
     if sports is None:
         sports = DEFAULT_SPORTS
-
     now = time.time()
     if now - _cache["time"] < CACHE_SECONDS:
         return _cache["results"]
-
     surebets: List[Dict[str, Any]] = []
     for sport in sports:
         params = {
@@ -110,10 +108,10 @@ def fetch_surebets(sports: List[str] | None = None, min_roi: float = 0.5):
                 "home_team": event.get("home_team"),
                 "away_team": event.get("away_team"),
                 "sport": event.get("sport_title", sport),
-                "league": event.get("sport_key", sport),  # ⭐️ add league key to avoid KeyError
+                "league": event.get("sport_key", sport),
                 "match_time": event.get("commence_time"),
                 "roi": roi,
-                "profit": round(roi, 2),
+                "profit": round(100 * roi / 100, 2),
                 "bets": [
                     {"bookmaker": best_odds[teams[0]]["bookmaker"], "odds": odds_a, "stake": stake_a},
                     {"bookmaker": best_odds[teams[1]]["bookmaker"], "odds": odds_b, "stake": stake_b},
