@@ -1,6 +1,3 @@
-flask
 requests
-beautifulsoup4
-lxml
-selenium
+python-dotenv
 python-telegram-bot==20.0
