@@ -41,7 +41,6 @@ def worker():
             logger.exception("worker error")
         time.sleep(FETCH_INTERVAL)
 
-# --- 啟動背景 worker 與 Telegram Bot ---
 threading.Thread(target=worker, daemon=True).start()
 threading.Thread(target=start_bot_polling, daemon=True).start()
 
@@ -49,5 +48,7 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
 
 # === 說明 ===
-# 1. 重新部署後，Bot 會自動回應 /start /help /roi 指令。
-# 2. 若只想推播、不開指令互動，可把 TELEGRAM_BOT_TOKEN 留空，或註解 start_bot_polling 線程。
+# 1. 發送訊息改用 HTML <pre> 包裝，明確 parse_mode="HTML"，解決 400 解析錯誤。
+# 2. Thread 內手動設置 asyncio event loop，解決 RuntimeError。
+# 3. 重新部署後，Bot poll 與推播均應正常。
+ (僅 worker log & import 行維持，不需其他改動)
