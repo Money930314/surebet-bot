@@ -42,20 +42,20 @@ def _fmt_time(iso_ts: str) -> str:
         return iso_ts or "TBD"
 
 def _format_match_html(match: Dict[str, Any]) -> str:
+    """Return Telegram‑safe HTML (no <br>)"""
     lines: List[str] = []
     lines.append(f"<b>🏅 {escape(match['sport'])} – {escape(match['league'])}</b>")
     lines.append(f"⚔️  {escape(match['home_team'])} vs {escape(match['away_team'])}")
     lines.append(f"🕒 開賽時間：{_fmt_time(match.get('match_time'))}")
-    lines.append("<br>")
+    lines.append("")  # blank line
     for bet in match["bets"]:
-        lines.append(
-            f"🎲 <b>{escape(bet['bookmaker'])}</b> @ {bet['odds']} → 投 {bet['stake']}")
-    lines.append("<br>")
-    lines.append(f"💰 ROI：<b>{match['roi']}%</b> &nbsp;|&nbsp; 預期獲利：{match['profit']}")
-    # event URL（若有）
+        lines.append(f"🎲 <b>{escape(bet['bookmaker'])}</b> @ {bet['odds']} → 投 {bet['stake']}")
+    lines.append("")
+    lines.append(f"💰 ROI：<b>{match['roi']}%</b>  |  預期獲利：{match['profit']}")
     if match.get("url"):
-        lines.append(f"<br>🔗 <a href='{escape(match['url'])}'>查看賽事詳情</a>")
-    return "\n".join(lines)
+        lines.append(f"🔗 <a href='{escape(match['url'])}'>查看賽事詳情</a>")
+    return "
+".join(lines)
 
 # ------------------ Low‑level sender ------------------
 
