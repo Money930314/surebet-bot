@@ -1,6 +1,5 @@
 """telegram_notifier.py
-推播 + 指令互動。
-修正：_format_match_plain() 的 join 換行字元寫錯導致 SyntaxError。
+推播 + 使用者指令互動。現在只在收到使用者指令時回覆，不主動推播賽事。
 """
 import os
 import logging
@@ -24,7 +23,7 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# ------------------ 共用：格式化訊息 ------------------
+# ------------------ 訊息格式 ------------------
 
 def _format_match_plain(match: Dict[str, Any]) -> str:
     lines = [
@@ -38,10 +37,9 @@ def _format_match_plain(match: Dict[str, Any]) -> str:
     lines.append(f"ROI: {match['roi']}%  預期獲利: {match['profit']}")
     return "\n".join(lines)
 
-# ------------------ 推播 ------------------
+# ------------------ 被動推播（選填，可保留函式供未來使用） ------------------
 
-def send_message(token: str, chat_id: str, match: Dict[str, Any]) -> bool:
-    text_plain = _format_match_plain(match)
+def send_message(token: str, chat_id: str, text_plain: str) -> bool:
     html_text = f"<pre>{escape(text_plain)}</pre>"
     resp = requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
@@ -60,10 +58,6 @@ def send_message(token: str, chat_id: str, match: Dict[str, Any]) -> bool:
         logger.error("❌ Telegram 發送失敗 %s", resp.text[:200])
     return ok
 
-def notify_telegram(match: Dict[str, Any]):
-    if BOT_TOKEN and CHAT_ID:
-        send_message(BOT_TOKEN, CHAT_ID, match)
-
 # ------------------ Bot 指令 ------------------
 async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -71,13 +65,15 @@ async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(textwrap.dedent(
-        """可用指令：
-        /roi          ➜ 取得 ROI 最高的 5 筆 Surebet
-        /roi <sport>  ➜ 只看指定運動（如 soccer、basketball）
-        /help         ➜ 這段說明
-        """
-    ))
+    await update.message.reply_text(
+        textwrap.dedent(
+            """可用指令：
+/roi          ➜ 取得 ROI 最高的 5 筆 Surebet
+/roi <sport>  ➜ 只看指定運動（如 soccer、basketball）
+/help         ➜ 這段說明
+"""
+        )
+    )
 
 from scraper import fetch_surebets
 
@@ -91,7 +87,9 @@ async def _cmd_roi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("目前沒有符合條件的套利機會 🙇‍♂️")
         return
     for match in bets:
-        await update.message.reply_text(f"<pre>{escape(_format_match_plain(match))}</pre>", parse_mode="HTML")
+        await update.message.reply_text(
+            f"<pre>{escape(_format_match_plain(match))}</pre>", parse_mode="HTML"
+        )
 
 async def _unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("未支援的指令，請輸入 /help 查看。")
@@ -99,9 +97,11 @@ async def _unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------ 啟動 polling ------------------
 
 def start_bot_polling():
+    """在子執行緒啟動 telegram polling，不註冊 signals。"""
     if not BOT_TOKEN:
         logger.warning("未設定 TELEGRAM_BOT_TOKEN，跳過 Bot Polling")
         return
+
     asyncio.set_event_loop(asyncio.new_event_loop())
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -111,4 +111,4 @@ def start_bot_polling():
     app.add_handler(MessageHandler(filters.COMMAND, _unknown))
 
     logger.info("🚀 Telegram Bot polling 開始…")
-    app.run_polling()
+    app.run_polling(stop_signals=None)
