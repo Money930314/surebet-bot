@@ -1,114 +1,115 @@
+"""telegram_notifier.py
+兩層功能：
+1. 被主程式呼叫 `notify_telegram(match)` → 推播單一 surebet
+2. 啟動一個 Telegram Bot (`/start /help /roi`) 供使用者互動查詢
+"""
 import os
-import requests
 import logging
+import textwrap
+from typing import Dict, Any, List
+
+import requests
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # 可選：推播用；指令互動不需要固定 chat_id
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# 建議函數：發送單筆套利機會訊息
-def send_message(bot_token: str, chat_id: str, match: dict) -> bool:
-    message = f"""
-🏅 {match['sport']} - {match['league']}
-🏟️ {match['home_team']} vs {match['away_team']}
-🕒 開賽時間：{match['match_time']}
+# ---------------------------------------------------------------------------
+# 共用：格式化訊息
+# ---------------------------------------------------------------------------
 
-📈 套利機會（ROI：{match['roi']}%）
-💸 建議下注平台與金額：
-""" + '\n'.join([
-        f"- {entry['bookmaker']} @ {entry['odds']} → 下注 ${entry['stake']}"
-        for entry in match['bets']
-    ]) + f"""
+def _format_match(match: Dict[str, Any]) -> str:
+    lines = [
+        f"🏅 *{match['sport']}* - {match['league']}",
+        f"{match['home_team']} vs {match['away_team']}",
+        "",
+    ]
+    for bet in match["bets"]:
+        lines.append(f"{bet['bookmaker']} @{bet['odds']} → 投 {bet['stake']}")
+    lines.append("")
+    lines.append(f"ROI: {match['roi']}%  預期獲利: {match['profit']}")
+    return "\n".join(lines)
 
-💰 預估利潤：${match['profit']}（{match['roi']}%）
-🔗 詳情連結：{match.get('url', 'N/A')}
-✅ 請盡快下單套利！
-"""
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = {"chat_id": chat_id, "text": message.strip(), "parse_mode": "HTML"}
-    try:
-        resp = requests.post(url, data=data, timeout=10)
-        if resp.status_code == 200:
-            logger.info("✅ Telegram 訊息發送成功")
-            return True
-        else:
-            logger.error(f"❌ Telegram API 錯誤: {resp.status_code} - {resp.text}")
-            return False
-    except requests.RequestException as e:
-        logger.error(f"❌ 網路錯誤: {e}")
-        return False
+# ---------------------------------------------------------------------------
+# 1) 推播給固定 chat_id
+# ---------------------------------------------------------------------------
 
-# 格式化多筆套利資料為單一訊息
-def format_surebet_message(matches: list[dict]) -> str:
-    if not matches:
-        return "❌ 目前沒有符合條件的套利機會\n\n💡 可能原因：\n• 市場波動較小\n• 博彩公司調整及時\n• 網站暫時無法訪問\n\n🔄 建議稍後再試或調整搜尋條件"
-    matches = sorted(matches, key=lambda x: x['roi'], reverse=True)
-    header = f"🎯 找到 {len(matches)} 筆套利機會！\n{'='*30}\n"
-    messages = []
-    total_profit = 0.0
-    for i, match in enumerate(matches, 1):
-        bets = '\n'.join([
-            f"  💳 {bets['bookmaker']}: {bets['odds']} → ${bets['stake']}" for bets in match['bets']
-        ])
-        total_profit += match['profit']
-        icon = get_sport_icon(match['sport'])
-        messages.append(
-            f"{i}. {icon} {match['sport']} - {match['home_team']} vs {match['away_team']}\n"
-            f"⏰ {match['match_time']}\n"
-            f"📊 ROI: {match['roi']}% | 利潤: ${match['profit']}\n"
-            f"💰 投注分配:\n{bets}\n"
-        )
-    full = header + '\n'.join(messages)
-    # 簡化截斷
-    return full
+def send_message(token: str, chat_id: str, match: Dict[str, Any]) -> bool:
+    text = _format_match(match)
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    resp = requests.post(url, json={
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }, timeout=10)
+    ok = resp.status_code == 200 and resp.json().get("ok")
+    if ok:
+        logger.info("✅ Telegram 訊息發送成功")
+    else:
+        logger.error("❌  Telegram 發送失敗 %s", resp.text[:200])
+    return ok
 
-# 簡易發送文字訊息（給 Flask 端測試等用途）
-def send_message_simple(message_text: str) -> bool:
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not bot_token or not chat_id:
-        logger.error("❌ 缺少 Telegram 環境變數")
-        return False
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = {"chat_id": chat_id, "text": message_text, "parse_mode": "HTML"}
-    try:
-        resp = requests.post(url, data=data, timeout=10)
-        return resp.status_code == 200
-    except requests.RequestException:
-        return False
+def notify_telegram(match: Dict[str, Any]):
+    if BOT_TOKEN and CHAT_ID:
+        send_message(BOT_TOKEN, CHAT_ID, match)
 
-# 發送錯誤通知
-def send_error_notification(error_message: str) -> bool:
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not bot_token or not chat_id:
-        return False
-    msg = f"🚨 系統錯誤通知\n\n❌ 錯誤描述: {error_message}\n🕒 時間: {get_current_time()}"
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
-    try:
-        return requests.post(url, data=data, timeout=10).status_code == 200
-    except:
-        return False
+# ---------------------------------------------------------------------------
+# 2) Telegram Bot 指令互動
+# ---------------------------------------------------------------------------
+async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Hi! 我是 Surebet Bot，輸入 /roi 可取得目前 ROI 最高的套利組合，或 /help 看指令。"
+    )
 
-# 新增：讓 main.py 可以 import
+async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(textwrap.dedent(
+        """可用指令：
+        /roi          ➜ 取得 ROI 最高的 5 筆 Surebet
+        /roi <sport>  ➜ 只看指定運動（如 soccer、basketball）
+        /help         ➜ 這段說明
+        """
+    ))
 
-def notify_telegram(match: dict) -> bool:
-    """Wrapper: 發送單筆 match dict"""
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not bot_token or not chat_id:
-        logger.error("❌ 缺少 Telegram 環境變數")
-        return False
-    return send_message(bot_token, chat_id, match)
+from scraper import fetch_surebets  # 避免循環 import 放後面
 
-# 運動圖標對應
-def get_sport_icon(sport: str) -> str:
-    icons = {
-        'Soccer':'⚽','Football':'⚽','Basketball':'🏀','Tennis':'🎾',
-        'Baseball':'⚾','Volleyball':'🏐','Hockey':'🏒','Golf':'⛳','Boxing':'🥊','Racing':'🏁'
-    }
-    return icons.get(sport, '🏆')
+async def _cmd_roi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    sport_filter = args[0] if args else None
+    bets: List[Dict[str, Any]] = fetch_surebets()
+    if sport_filter:
+        bets = [b for b in bets if sport_filter.lower() in b["sport"].lower()]
+    bets = bets[:5]
+    if not bets:
+        await update.message.reply_text("目前沒有符合條件的套利機會 🙇‍♂️")
+        return
+    for match in bets:
+        await update.message.reply_text(_format_match(match), parse_mode=ParseMode.MARKDOWN)
 
-# 取得當前時間文字
-def get_current_time() -> str:
-    from datetime import datetime
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+async def _unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("指令未支援，請輸入 /help 查看。")
+
+# ---------------------- 啟動 polling (給 main.py 呼叫) ----------------------
+
+def start_bot_polling():
+    if not BOT_TOKEN:
+        logger.warning("未設定 TELEGRAM_BOT_TOKEN，跳過 Bot Polling")
+        return
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", _cmd_start))
+    app.add_handler(CommandHandler("help", _cmd_help))
+    app.add_handler(CommandHandler("roi", _cmd_roi))
+    app.add_handler(CommandHandler(None, _unknown))  # fallback
+
+    logger.info("🚀 Telegram Bot polling 開始…")
+    app.run_polling()
