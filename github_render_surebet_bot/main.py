@@ -1,5 +1,5 @@
 """main.py
-Render 執行入口：定時抓取 surebets 並推 Telegram，並啟動 Telegram Bot 指令模式。
+維持不變
 """
 import os
 import threading
@@ -46,9 +46,3 @@ threading.Thread(target=start_bot_polling, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-
-# === 說明 ===
-# 1. 發送訊息改用 HTML <pre> 包裝，明確 parse_mode="HTML"，解決 400 解析錯誤。
-# 2. Thread 內手動設置 asyncio event loop，解決 RuntimeError。
-# 3. 重新部署後，Bot poll 與推播均應正常。
-
