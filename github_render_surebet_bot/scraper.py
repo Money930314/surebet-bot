@@ -1,335 +1,195 @@
+# scraper.py
+
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+from selenium.common.exceptions import TimeoutException
 import time
-from datetime import datetime, timedelta
-import logging
-import sys
 import random
+import logging
 import requests
 from bs4 import BeautifulSoup
 import re
+from datetime import datetime
 
-# 配置 logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+# 日誌
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# 全局變量來跟蹤上次請求時間和結果
+# 緩存設定
+CACHE_DURATION = 60  # seconds
 last_request_time = None
 last_results = None
-CACHE_DURATION = 300  # 5分鐘緩存
 
-def create_driver():
-    """建立 Chrome WebDriver"""
+def create_webdriver():
     chrome_options = Options()
     chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-    
-    # 添加 User-Agent 避免被識別為機器人
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-    
-    try:
-        driver = webdriver.Chrome(options=chrome_options)
-        # 隱藏 webdriver 特徵
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        logger.info("✅ WebDriver 創建成功")
-        return driver
-    except Exception as e:
-        logger.error(f"❌ 建立 WebDriver 失敗: {e}")
-        return None
-
-def scrape_with_requests():
-    """使用 requests 嘗試爬取資料"""
-    logger.info("🔄 嘗試使用 requests 爬取資料...")
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-    }
-    
-    try:
-        # 嘗試訪問 OddsPortal 主頁
-        session = requests.Session()
-        session.headers.update(headers)
-        
-        response = session.get("https://www.oddsportal.com/", timeout=10)
-        if response.status_code != 200:
-            logger.warning(f"⚠️ 主頁訪問失敗: {response.status_code}")
-            return []
-        
-        # 嘗試訪問套利頁面
-        response = session.get("https://www.oddsportal.com/sure-bets/", timeout=10)
-        if response.status_code != 200:
-            logger.warning(f"⚠️ 套利頁面訪問失敗: {response.status_code}")
-            return []
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # 檢查是否有反爬蟲保護
-        page_content = response.text.lower()
-        if any(keyword in page_content for keyword in ['cloudflare', 'ddos', 'bot detection', 'access denied', 'blocked']):
-            logger.warning("⚠️ 檢測到反爬蟲保護 (requests)")
-            return []
-        
-        # 嘗試解析套利資料
-        return parse_surebet_data(soup)
-            
-    except requests.RequestException as e:
-        logger.error(f"❌ requests 爬取失敗: {e}")
-        return []
-
-def parse_surebet_data(soup):
-    """解析套利資料"""
-    bets = []
-    
-    try:
-        # 嘗試找到套利資料表格或容器
-        # 這裡需要根據實際網站結構來調整選擇器
-        surebet_containers = soup.find_all(['div', 'table', 'tr'], class_=re.compile(r'sure|bet|arbitrage', re.I))
-        
-        if not surebet_containers:
-            logger.info("❌ 未找到套利資料容器")
-            return []
-        
-        for container in surebet_containers:
-            try:
-                # 嘗試提取比賽資訊
-                match_info = extract_match_info(container)
-                if match_info:
-                    bets.append(match_info)
-            except Exception as e:
-                logger.debug(f"解析容器時發生錯誤: {e}")
-                continue
-        
-        logger.info(f"✅ 成功解析 {len(bets)} 筆套利資料")
-        return bets
-        
-    except Exception as e:
-        logger.error(f"❌ 解析套利資料時發生錯誤: {e}")
-        return []
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    return driver
 
 def extract_match_info(container):
-    """從容器中提取比賽資訊"""
+    """從 requests + BeautifulSoup 提取比賽資訊 (備援)"""
     try:
-        # 這裡需要根據實際的HTML結構來實現
-        # 目前返回 None 表示無法提取
-        return None
+        cells = container.find_all("td")
+        if len(cells) < 7:
+            return None
+        match_time = cells[0].get_text(strip=True)
+        teams = cells[1].get_text(strip=True).split(" - ")
+        if len(teams) != 2:
+            return None
+        home, away = teams
+        bm1, odd1 = cells[2].get_text(strip=True), cells[3].get_text(strip=True)
+        bm2, odd2 = cells[4].get_text(strip=True), cells[5].get_text(strip=True)
+        roi_text = cells[6].get_text(strip=True).rstrip("%")
+        roi = float(roi_text)
+        total_stake = 100
+        profit = total_stake * roi / 100.0
+        bets = [
+            {"bookmaker": bm1, "odds": odd1, "stake": round(total_stake / 2, 2)},
+            {"bookmaker": bm2, "odds": odd2, "stake": round(total_stake / 2, 2)},
+        ]
+        link = container.find("a")
+        url = link["href"] if link and link.has_attr("href") else None
+        return {
+            "sport": "Unknown",
+            "league": "Unknown",
+            "home_team": home,
+            "away_team": away,
+            "match_time": match_time,
+            "bets": bets,
+            "roi": roi,
+            "profit": profit,
+            "url": url,
+        }
     except Exception as e:
         logger.debug(f"提取比賽資訊時發生錯誤: {e}")
         return None
 
-def scrape_oddsportal_surebets():
-    """
-    爬取 OddsPortal 的套利投注資料 - 只返回真實資料
-    """
-    global last_request_time, last_results
-    
-    # 檢查緩存
-    current_time = time.time()
-    if (last_request_time and last_results is not None and 
-        current_time - last_request_time < CACHE_DURATION):
-        logger.info("📦 使用緩存資料")
-        return last_results
-    
-    # 首先嘗試使用 requests
-    results = scrape_with_requests()
-    if results:
-        logger.info("✅ requests 爬取成功")
-        last_request_time = current_time
-        last_results = results
+def scrape_with_requests():
+    """備援：使用 requests + BeautifulSoup 爬取"""
+    try:
+        resp = requests.get("https://www.oddsportal.com/sure-bets/", timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = soup.select("table tr")
+        results = []
+        for row in rows:
+            info = extract_match_info(row)
+            if info:
+                results.append(info)
         return results
-    
-    # 如果 requests 失敗，嘗試 Selenium
-    driver = create_driver()
-    if not driver:
-        logger.error("❌ 無法創建 WebDriver")
-        # 更新緩存為空結果
-        last_request_time = current_time
-        last_results = []
-        return []
-    
-    bets = []
-    
-    try:
-        logger.info("🔍 開始使用 Selenium 爬取 OddsPortal 套利資料...")
-        
-        # 設置頁面載入超時
-        driver.set_page_load_timeout(30)
-        
-        # 先訪問主頁建立 session
-        logger.info("🌐 訪問 OddsPortal 主頁...")
-        driver.get("https://www.oddsportal.com")
-        time.sleep(random.uniform(2, 4))
-        
-        # 再訪問套利頁面
-        logger.info("🌐 訪問套利頁面...")
-        driver.get("https://www.oddsportal.com/sure-bets/")
-        
-        # 等待頁面載入
-        wait = WebDriverWait(driver, 20)
-        
-        # 檢查頁面是否正常載入
-        try:
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            logger.info("✅ 頁面載入完成")
-        except TimeoutException:
-            logger.error("❌ 頁面載入超時")
-            last_request_time = current_time
-            last_results = []
-            return []
-        
-        # 檢查是否有反爬蟲保護
-        page_source = driver.page_source.lower()
-        if any(keyword in page_source for keyword in ['cloudflare', 'ddos', 'bot detection', 'access denied', 'blocked']):
-            logger.warning("⚠️ 檢測到反爬蟲保護 (Selenium)")
-            last_request_time = current_time
-            last_results = []
-            return []
-        
-        # 嘗試解析套利資料
-        bets = parse_selenium_data(driver)
-        
-        if not bets:
-            logger.info("❌ 未找到套利資料")
-            last_request_time = current_time
-            last_results = []
-            return []
-        
-        logger.info(f"✅ 成功爬取 {len(bets)} 筆套利資料")
-        last_request_time = current_time
-        last_results = bets
-        return bets
-        
-    except WebDriverException as e:
-        logger.error(f"❌ WebDriver 錯誤: {e}")
-        last_request_time = current_time
-        last_results = []
-        return []
-    except TimeoutException:
-        logger.error("❌ 頁面載入超時")
-        last_request_time = current_time
-        last_results = []
-        return []
     except Exception as e:
-        logger.error(f"❌ 爬蟲過程發生錯誤: {e}")
-        last_request_time = current_time
-        last_results = []
-        return []
-        
-    finally:
-        try:
-            if driver:
-                driver.quit()
-                logger.info("🔚 WebDriver 已關閉")
-        except Exception as e:
-            logger.error(f"❌ 關閉 WebDriver 時發生錯誤: {e}")
-
-def parse_selenium_data(driver):
-    """使用 Selenium 解析套利資料"""
-    bets = []
-    
-    try:
-        # 嘗試找到套利資料表格
-        # 這裡需要根據實際的網站結構來調整選擇器
-        possible_selectors = [
-            "table.table-main",
-            "[data-cy='table']",
-            ".odds-table",
-            ".surebet-table",
-            "table",
-            ".table"
-        ]
-        
-        table_elements = []
-        for selector in possible_selectors:
-            try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements:
-                    table_elements.extend(elements)
-                    logger.info(f"✅ 找到表格元素: {selector}")
-                    break
-            except Exception as e:
-                logger.debug(f"選擇器 {selector} 失敗: {e}")
-                continue
-        
-        if not table_elements:
-            logger.warning("⚠️ 未找到資料表格")
-            return []
-        
-        # 嘗試解析表格資料
-        for table in table_elements:
-            try:
-                rows = table.find_elements(By.TAG_NAME, "tr")
-                for row in rows:
-                    match_data = extract_selenium_match_data(row)
-                    if match_data:
-                        bets.append(match_data)
-            except Exception as e:
-                logger.debug(f"解析表格時發生錯誤: {e}")
-                continue
-        
-        return bets
-        
-    except Exception as e:
-        logger.error(f"❌ 使用 Selenium 解析資料時發生錯誤: {e}")
+        logger.warning(f"❌ requests 爬取失敗: {e}")
         return []
 
 def extract_selenium_match_data(row_element):
-    """從表格行中提取比賽資料"""
+    """從 Selenium 抓到的 <tr> 元素中提取比賽資料"""
     try:
-        # 這裡需要根據實際的HTML結構來實現
-        # 目前返回 None 表示無法提取
-        return None
+        cells = row_element.find_elements(By.TAG_NAME, "td")
+        if len(cells) < 7:
+            return None
+        match_time = cells[0].text.strip()
+        teams = cells[1].text.strip().split(" - ")
+        if len(teams) != 2:
+            return None
+        home, away = teams
+        bm1, odd1 = cells[2].text.strip(), cells[3].text.strip()
+        bm2, odd2 = cells[4].text.strip(), cells[5].text.strip()
+        roi_text = cells[6].text.strip().rstrip("%")
+        roi = float(roi_text)
+        total_stake = 100
+        profit = total_stake * roi / 100.0
+        bets = [
+            {"bookmaker": bm1, "odds": odd1, "stake": round(total_stake / 2, 2)},
+            {"bookmaker": bm2, "odds": odd2, "stake": round(total_stake / 2, 2)},
+        ]
+        try:
+            link = row_element.find_element(By.TAG_NAME, "a")
+            url = link.get_attribute("href")
+        except:
+            url = None
+        return {
+            "sport": "Unknown",
+            "league": "Unknown",
+            "home_team": home,
+            "away_team": away,
+            "match_time": match_time,
+            "bets": bets,
+            "roi": roi,
+            "profit": profit,
+            "url": url,
+        }
     except Exception as e:
         logger.debug(f"提取比賽資料時發生錯誤: {e}")
         return None
 
-def clear_cache():
-    """清除緩存"""
-    global last_request_time, last_results
-    last_request_time = None
-    last_results = None
-    logger.info("🧹 緩存已清除")
+def parse_selenium_data(driver):
+    bets = []
+    possible_selectors = [
+        "table.table-main", "[data-cy='table']", ".odds-table", ".surebet-table", "table", ".table"
+    ]
+    table_elements = []
+    for selector in possible_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, selector)
+            if els:
+                table_elements = els
+                break
+        except:
+            continue
+    if not table_elements:
+        return []
+    for table in table_elements:
+        rows = table.find_elements(By.TAG_NAME, "tr")
+        for row in rows:
+            data = extract_selenium_match_data(row)
+            if data:
+                bets.append(data)
+    return bets
 
-def test_scraper():
-    """測試爬蟲功能"""
-    logger.info("🧪 開始測試爬蟲...")
-    
-    # 清除緩存確保獲取新資料
-    clear_cache()
-    
-    results = scrape_oddsportal_surebets()
-    
+def scrape_oddsportal_surebets():
+    """主流程：先檢查緩存，再 fallback requests，最後 selenium"""
+    global last_request_time, last_results
+    now = time.time()
+    if last_request_time and last_results is not None and now - last_request_time < CACHE_DURATION:
+        return last_results
+
+    # 1) requests
+    results = scrape_with_requests()
     if results:
-        logger.info(f"\n📋 測試結果: 找到 {len(results)} 筆套利機會")
-        for i, bet in enumerate(results):
-            logger.info(f"\n{i+1}. {bet.get('sport', 'Unknown')} - {bet.get('league', 'Unknown')}")
-            logger.info(f"   比賽: {bet.get('home_team', 'Unknown')} vs {bet.get('away_team', 'Unknown')}")
-            logger.info(f"   時間: {bet.get('match_time', 'Unknown')}")
-            logger.info(f"   ROI: {bet.get('roi', 'Unknown')}%")
-            logger.info(f"   利潤: ${bet.get('profit', 'Unknown')}")
-    else:
-        logger.info("❌ 沒有找到套利機會")
-    
-    return results
+        last_request_time, last_results = now, results
+        return results
+
+    # 2) selenium
+    driver = create_webdriver()
+    try:
+        driver.set_page_load_timeout(30)
+        driver.get("https://www.oddsportal.com/sure-bets/")
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(random.uniform(2, 4))
+        results = parse_selenium_data(driver)
+        last_request_time, last_results = now, results
+        return results
+    except Exception as e:
+        logger.error(f"❌ Selenium 爬取失敗: {e}")
+        return []
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
 
 if __name__ == "__main__":
-    test_scraper()
+    # 本地測試
+    data = scrape_oddsportal_surebets()
+    logger.info(f"測試結束，共抓到 {len(data)} 筆資料")
+    for d in data:
+        logger.info(d)
