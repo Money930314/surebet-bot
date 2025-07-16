@@ -1,17 +1,13 @@
-"""scraper.py
-改版：改用 The Odds API 取代爬蟲，並計算 surebet（雙邊賠率套利）。
-"""
+"""scraper.py – call The Odds API, compute surebet list."""
 import os
 import time
 import logging
-from typing import List, Dict, Any
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any, Optional
 
 import requests
 from dotenv import load_dotenv
 
-# --------------------------------------------------
-# 設定與常數
-# --------------------------------------------------
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -19,109 +15,125 @@ logger.setLevel(logging.INFO)
 API_KEY = os.getenv("THE_ODDS_API_KEY", "e9c7f8945b8fcab5d904fc7f6ef6c2da")
 BASE_URL = "https://api.the-odds-api.com/v4"
 
-FRIENDLY_BOOKMAKERS = [
-    "pinnacle",       # Pinnacle Sports
-    "betfair_ex",    # Betfair Exchange
-    "smarkets",      # Smarkets Exchange
-]
-
-MARKET_KEY = "h2h"  # 2‑way moneyline
-
+FRIENDLY_BOOKMAKERS = ["pinnacle", "betfair_ex", "smarkets"]
 DEFAULT_SPORTS = [
     "basketball_nba",
-    "basketball_euroleague",
+    "tennis_atp",
+    "volleyball_world",
     "soccer_epl",
-    "soccer_uefa_champs_league",
+    "baseball_mlb",
 ]
+MARKET_KEY = "h2h"
 
 CACHE_SECONDS = 30
-_cache: Dict[str, Any] = {"time": 0, "results": []}
+_cache: Dict[str, Any] = {"time": 0, "params": {}, "results": []}
 
-def _call_odds_api(endpoint: str, params: Dict[str, Any]) -> Any:
-    url = f"{BASE_URL}{endpoint}"
+# ------------- helpers ------------------
+
+def _call(endpoint: str, params: Dict[str, Any]):
     params["apiKey"] = API_KEY
+    url = f"{BASE_URL}{endpoint}"
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.HTTPError as e:
-        if e.response.status_code == 404:
-            logger.debug("%s %s", endpoint, e.response.json().get("message"))
-        else:
-            logger.error("HTTPError %s: %.200s", e.response.status_code, e.response.text)
-        return None
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json()
     except requests.RequestException as e:
-        logger.error("RequestException: %s", e)
+        logger.error("Odds API error: %s", e)
         return None
 
-def _calc_two_way_surebet(odds_a: float, odds_b: float) -> float:
-    inv_sum = 1 / odds_a + 1 / odds_b
+def _calc_roi(o1: float, o2: float) -> float:
+    inv_sum = 1 / o1 + 1 / o2
     if inv_sum >= 1:
         return -1
     return round((1 / inv_sum - 1) * 100, 2)
 
-def _stake_split(total: float, odds_a: float, odds_b: float):
-    inv_sum = 1 / odds_a + 1 / odds_b
-    stake_a = total / (odds_a * inv_sum)
-    stake_b = total / (odds_b * inv_sum)
-    return round(stake_a, 2), round(stake_b, 2)
+def _stake_split(total: float, o1: float, o2: float):
+    inv_sum = 1 / o1 + 1 / o2
+    return round(total / (o1 * inv_sum), 2), round(total / (o2 * inv_sum), 2)
 
-def fetch_surebets(sports: List[str] | None = None, min_roi: float = 0.5):
+# ------------- main ----------------------
+
+def fetch_surebets(
+    sports: Optional[List[str]] = None,
+    min_roi: float = 0.0,
+    total_stake: float = 100.0,
+    days_window: int = 2,
+):
+    """Return list of surebets filtered by roi and commence_time (tomorrow~+days_window)."""
     if sports is None:
         sports = DEFAULT_SPORTS
+
+    # cache key
+    key = (tuple(sorted(sports)), min_roi, total_stake, days_window)
     now = time.time()
-    if now - _cache["time"] < CACHE_SECONDS:
+    if key == _cache.get("params") and now - _cache["time"] < CACHE_SECONDS:
         return _cache["results"]
-    surebets: List[Dict[str, Any]] = []
+
+    start = datetime.now(timezone.utc).date() + timedelta(days=1)
+    end = start + timedelta(days=days_window - 1)
+
+    results: List[Dict[str, Any]] = []
     for sport in sports:
-        params = {
-            "regions": "eu",
-            "markets": MARKET_KEY,
-            "oddsFormat": "decimal",
-            "bookmakers": ",".join(FRIENDLY_BOOKMAKERS),
-        }
-        data = _call_odds_api(f"/sports/{sport}/odds", params)
+        data = _call(
+            f"/sports/{sport}/odds",
+            {
+                "regions": "eu",
+                "markets": MARKET_KEY,
+                "oddsFormat": "decimal",
+                "bookmakers": ",".join(FRIENDLY_BOOKMAKERS),
+            },
+        )
         if not data:
             continue
-        for event in data:
-            best_odds: Dict[str, Dict[str, Any]] = {}
-            for bm in event.get("bookmakers", []):
-                bm_title = bm.get("title")
-                for market in bm.get("markets", []):
-                    if market.get("key") != MARKET_KEY:
-                        continue
-                    for outcome in market.get("outcomes", []):
-                        name = outcome.get("name")
-                        price = outcome.get("price")
-                        if name not in best_odds or price > best_odds[name]["price"]:
-                            best_odds[name] = {"price": price, "bookmaker": bm_title}
-            if len(best_odds) < 2:
+        for ev in data:
+            comm = ev.get("commence_time")
+            try:
+                comm_dt = datetime.fromisoformat(comm.replace("Z", "+00:00"))
+            except Exception:
                 continue
-            teams = list(best_odds.keys())
-            odds_a = best_odds[teams[0]]["price"]
-            odds_b = best_odds[teams[1]]["price"]
-            roi = _calc_two_way_surebet(odds_a, odds_b)
+            if not (start <= comm_dt.date() <= end):
+                continue
+            best: Dict[str, Dict[str, Any]] = {}
+            for bm in ev.get("bookmakers", []):
+                title = bm.get("title")
+                for m in bm.get("markets", []):
+                    if m.get("key") != MARKET_KEY:
+                        continue
+                    for out in m.get("outcomes", []):
+                        name = out.get("name")
+                        price = out.get("price")
+                        if name not in best or price > best[name]["price"]:
+                            best[name] = {"price": price, "bookmaker": title}
+            if len(best) < 2:
+                continue
+            teams = list(best.keys())
+            o1, o2 = best[teams[0]]["price"], best[teams[1]]["price"]
+            roi = _calc_roi(o1, o2)
             if roi < min_roi:
                 continue
-            stake_a, stake_b = _stake_split(100, odds_a, odds_b)
-            surebets.append({
-                "home_team": event.get("home_team"),
-                "away_team": event.get("away_team"),
-                "sport": event.get("sport_title", sport),
-                "league": event.get("sport_key", sport),
-                "match_time": event.get("commence_time"),
-                "roi": roi,
-                "profit": round(100 * roi / 100, 2),
-                "bets": [
-                    {"bookmaker": best_odds[teams[0]]["bookmaker"], "odds": odds_a, "stake": stake_a},
-                    {"bookmaker": best_odds[teams[1]]["bookmaker"], "odds": odds_b, "stake": stake_b},
-                ],
-            })
-    surebets.sort(key=lambda x: x["roi"], reverse=True)
+            s1, s2 = _stake_split(total_stake, o1, o2)
+            results.append(
+                {
+                    "sport": ev.get("sport_title", sport),
+                    "league": ev.get("sport_key", sport),
+                    "home_team": ev.get("home_team"),
+                    "away_team": ev.get("away_team"),
+                    "match_time": comm,
+                    "bets": [
+                        {"bookmaker": best[teams[0]]["bookmaker"], "odds": o1, "stake": s1},
+                        {"bookmaker": best[teams[1]]["bookmaker"], "odds": o2, "stake": s2},
+                    ],
+                    "roi": roi,
+                    "profit": round(total_stake * roi / 100, 2),
+                    "url": f"https://the-odds-api.com/event/{ev.get('id')}" if ev.get("id") else None,
+                }
+            )
+    results.sort(key=lambda x: x["roi"], reverse=True)
     _cache["time"] = now
-    _cache["results"] = surebets
-    return surebets
+    _cache["params"] = key
+    _cache["results"] = results
+    return results
 
+# quick test
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    print(fetch_surebets()[:3])
+    print(fetch_surebets(total_stake=200)[:2])
