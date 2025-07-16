@@ -1,24 +1,22 @@
 """main.py
-維持不變
+改版：
+* 移除自動推播邏輯，只保留 API 與 Telegram 指令互動。
+* /surebets 路由動態呼叫 `fetch_surebets`，無需背景 worker。
 """
 import os
 import threading
-import time
 import logging
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 from scraper import fetch_surebets
-from telegram_notifier import notify_telegram, start_bot_polling
+from telegram_notifier import start_bot_polling
 
-TELEGRAM_ENABLED = bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"))
-FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", 300))
-MIN_ROI = float(os.getenv("MIN_ROI", 1))
+FETCH_MIN_ROI = float(os.getenv("MIN_ROI", 1))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("surebet-main")
 
 app = Flask(__name__)
-_latest = []
 
 @app.route("/healthz")
 def health():
@@ -26,23 +24,14 @@ def health():
 
 @app.route("/surebets")
 def surebets_route():
-    return jsonify(_latest)
+    roi = request.args.get("min_roi", default=FETCH_MIN_ROI, type=float)
+    return jsonify(fetch_surebets(min_roi=roi))
 
-def worker():
-    global _latest
-    while True:
-        try:
-            bets = fetch_surebets(min_roi=MIN_ROI)
-            _latest = bets
-            logger.info("抓到 %d 筆 surebet (ROI≥%.1f)", len(bets), MIN_ROI)
-            if TELEGRAM_ENABLED and bets:
-                notify_telegram(bets[0])
-        except Exception:
-            logger.exception("worker error")
-        time.sleep(FETCH_INTERVAL)
-
-threading.Thread(target=worker, daemon=True).start()
+# 啟動 Telegram Bot (非阻塞)
 threading.Thread(target=start_bot_polling, daemon=True).start()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# --- End of file ---
