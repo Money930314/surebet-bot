@@ -1,118 +1,217 @@
-import os
-import sys
+import time
+import random
 import logging
-from flask import Flask
-from threading import Thread
-import asyncio
+from datetime import datetime
 
-from telegram import Update
-from telegram.ext import (
-    Application,
-    MessageHandler,
-    CommandHandler,
-    filters,
-    ContextTypes,
-)
-
-from scraper import scrape_oddsportal_surebets
-from telegram_notifier import notify_telegram
+import requests
+from requests.exceptions import HTTPError
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
 # 日誌設定
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# 環境變數
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not TELEGRAM_BOT_TOKEN:
-    logger.error("❌ 未設定 TELEGRAM_BOT_TOKEN")
-    sys.exit(1)
+# 緩存設定
+CACHE_DURATION = 60  # seconds
+data_cache = {
+    "time": None,
+    "results": None
+}
 
-app = Flask(__name__)
-telegram_app = None
-is_processing = False  # 防止重複處理
-
-@app.route("/")
-def home():
-    return "🤖 Surebet Bot 運行中！"
-
-@app.route("/trigger")
-def trigger_bot():
-    return run_scraper_and_notify()
-
-@app.route("/test-telegram")
-def test_telegram():
-    try:
-        notify_telegram({"text": "📣 測試訊息，Bot 正常運作！"})
-        return "✅ 已發送測試訊息"
-    except Exception as e:
-        logger.error(f"❌ 發送測試訊息失敗: {e}")
-        return f"❌ {e}"
-
-
-def run_scraper_and_notify():
-    global is_processing
-    if is_processing:
-        return "⏳ 正在處理中，請稍後再試"
-    is_processing = True
-    try:
-        results = scrape_oddsportal_surebets()
-        if not results:
-            return "❌ 未抓到套利機會"
-        for match in results:
-            notify_telegram(match)
-        return f"📤 已發送 {len(results)} 筆套利機會"
-    except Exception as e:
-        logger.error(f"❌ 推播時發生錯誤: {e}")
-        return f"❌ {e}"
-    finally:
-        is_processing = False
-
-
-# ---------- 同步啟動 Telegram Bot ----------
-def start_bot():
-    # 為此執行緒建立新的 asyncio 事件循環
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # 指令處理函式
-    async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("👋 歡迎使用 Surebet Bot！輸入 /help 查看指令。")
-
-    async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "/start - 開始\n"
-            "/help - 幫助\n"
-            "/clear - 清除狀態\n"
-            "直接傳送任意文字可觸發套利檢索"
-        )
-
-    async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data.clear()
-        await update.message.reply_text("🗑️ 已清除狀態。")
-
-    async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("🔍 正在搜尋套利機會...")
-        result = run_scraper_and_notify()
-        await update.message.reply_text(result)
-
-    # 註冊 handler
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("clear", clear_command))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler)
+def create_webdriver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     )
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.execute_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+    return driver
 
-    logger.info("🤖 Telegram Bot 開始運行 (polling)")
-    # 不在主線程中時，禁用信號處理
-    application.run_polling(stop_signals=[])
+
+def extract_match_info(container):
+    try:
+        cells = container.find_all("td")
+        if len(cells) < 7:
+            return None
+        match_time = cells[0].get_text(strip=True)
+        teams = cells[1].get_text(strip=True).split(" - ")
+        if len(teams) != 2:
+            return None
+        home, away = teams
+        bm1, odd1 = cells[2].get_text(strip=True), cells[3].get_text(strip=True)
+        bm2, odd2 = cells[4].get_text(strip=True), cells[5].get_text(strip=True)
+        roi_text = cells[6].get_text(strip=True).rstrip("%")
+        roi = float(roi_text)
+        total_stake = 100
+        profit = total_stake * roi / 100.0
+        bets = [
+            {"bookmaker": bm1, "odds": odd1, "stake": round(total_stake / 2, 2)},
+            {"bookmaker": bm2, "odds": odd2, "stake": round(total_stake / 2, 2)},
+        ]
+        link = container.find("a")
+        url = link["href"] if link and link.has_attr("href") else None
+        return {
+            "sport": "Unknown",
+            "league": "Unknown",
+            "home_team": home,
+            "away_team": away,
+            "match_time": match_time,
+            "bets": bets,
+            "roi": roi,
+            "profit": profit,
+            "url": url,
+        }
+    except Exception as e:
+        logger.debug(f"提取比賽資訊時發生錯誤: {e}")
+        return None
+
+
+def scrape_with_requests():
+    """
+    使用 requests 爬取，若遇到 429 Too Many Requests，直接返回空列表以便使用 Selenium
+    """
+    url = "https://www.oddsportal.com/sure-bets/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.oddsportal.com/",
+    }
+    try:
+        resp = requests.get(url, timeout=15, headers=headers)
+        if resp.status_code == 429:
+            logger.warning("❌ requests 爬取失敗: 429 Too Many Requests，切換到 Selenium 模式")
+            return []
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = soup.select("table tr")
+        results = []
+        for row in rows:
+            info = extract_match_info(row)
+            if info:
+                results.append(info)
+        return results
+    except HTTPError as e:
+        if e.response is not None and e.response.status_code == 429:
+            logger.warning("❌ HTTPError 429，切換到 Selenium 模式")
+            return []
+        logger.warning(f"❌ requests 爬取失敗: {e}")
+        return []
+    except Exception as e:
+        logger.warning(f"❌ requests 爬取失敗: {e}")
+        return []
+
+
+def extract_selenium_match_data(row_element):
+    try:
+        cells = row_element.find_elements(By.TAG_NAME, "td")
+        if len(cells) < 7:
+            return None
+        match_time = cells[0].text.strip()
+        teams = cells[1].text.strip().split(" - ")
+        if len(teams) != 2:
+            return None
+        home, away = teams
+        bm1, odd1 = cells[2].text.strip(), cells[3].text.strip()
+        bm2, odd2 = cells[4].text.strip(), cells[5].text.strip()
+        roi_text = cells[6].text.strip().rstrip("%")
+        roi = float(roi_text)
+        total_stake = 100
+        profit = total_stake * roi / 100.0
+        bets = [
+            {"bookmaker": bm1, "odds": odd1, "stake": round(total_stake / 2, 2)},
+            {"bookmaker": bm2, "odds": odd2, "stake": round(total_stake / 2, 2)},
+        ]
+        try:
+            link = row_element.find_element(By.TAG_NAME, "a")
+            url = link.get_attribute("href")
+        except:
+            url = None
+        return {
+            "sport": "Unknown",
+            "league": "Unknown",
+            "home_team": home,
+            "away_team": away,
+            "match_time": match_time,
+            "bets": bets,
+            "roi": roi,
+            "profit": profit,
+            "url": url,
+        }
+    except Exception as e:
+        logger.debug(f"提取比賽資料時發生錯誤: {e}")
+        return None
+
+
+def parse_selenium_data(driver):
+    bets = []
+    selectors = ["table.table-main", "[data-cy='table']", ".odds-table", ".surebet-table", "table"]
+    for sel in selectors:
+        try:
+            tables = driver.find_elements(By.CSS_SELECTOR, sel)
+            if tables:
+                for table in tables:
+                    for row in table.find_elements(By.TAG_NAME, "tr"):
+                        data = extract_selenium_match_data(row)
+                        if data:
+                            bets.append(data)
+                if bets:
+                    return bets
+        except Exception:
+            continue
+    return bets
+
+
+def scrape_oddsportal_surebets():
+    """
+    主流程：先檢查緩存，再用 requests，最後用 Selenium
+    """
+    now = time.time()
+    if data_cache["time"] and data_cache["results"] is not None and now - data_cache["time"] < CACHE_DURATION:
+        return data_cache["results"]
+
+    # 1) 試用 requests
+    results = scrape_with_requests()
+    if results:
+        data_cache["time"] = now
+        data_cache["results"] = results
+        return results
+
+    # 2) Selenium fallback
+    driver = create_webdriver()
+    try:
+        driver.set_page_load_timeout(30)
+        driver.get("https://www.oddsportal.com/sure-bets/")
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(random.uniform(2, 4))
+        results = parse_selenium_data(driver)
+        data_cache["time"] = now
+        data_cache["results"] = results
+        return results
+    except Exception as e:
+        logger.error(f"❌ Selenium 爬取失敗: {e}")
+        return []
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
 
 
 if __name__ == "__main__":
-    # 背景啟動 Telegram Bot
-    Thread(target=start_bot, daemon=True).start()
-    logger.info("🚀 Flask HTTP API 服務啟動中...")
-    app.run(host="0.0.0.0", port=10000)
+    data = scrape_oddsportal_surebets()
+    logger.info(f"測試結束，共抓到 {len(data)} 筆資料")
+    for d in data:
+        logger.info(d)
