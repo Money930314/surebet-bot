@@ -34,6 +34,12 @@ from scraper import fetch_surebets, FRIENDLY_BOOKMAKERS  # after BOT_TOKEN loade
 
 # ------------------ Message formatter ------------------
 
+BOOKMAKER_URLS = {
+    "pinnacle": "https://www.pinnacle.com/",
+    "betfair_ex": "https://www.betfair.com/exchange/",
+    "smarkets": "https://smarkets.com/",
+}
+
 def _fmt_time(iso_ts: str) -> str:
     try:
         dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
@@ -41,21 +47,33 @@ def _fmt_time(iso_ts: str) -> str:
     except Exception:
         return iso_ts or "TBD"
 
+
 def _format_match_html(match: Dict[str, Any]) -> str:
-    """Return Telegram‑safe HTML (no <br>)"""
+    """Return Telegram‑safe HTML message."""
     lines: List[str] = []
+    # Title
     lines.append(f"<b>🏅 {escape(match['sport'])} – {escape(match['league'])}</b>")
-    lines.append(f"⚔️  {escape(match['home_team'])} vs {escape(match['away_team'])}")
+    # Teams
+    lines.append(f"⚔️  {escape(match['home_team'])} vs {escape(match['away_team'])}")
+    # Kick‑off time
     lines.append(f"🕒 開賽時間：{_fmt_time(match.get('match_time'))}")
-    lines.append("")  # blank line
-    for bet in match["bets"]:
-        lines.append(f"🎲 <b>{escape(bet['bookmaker'])}</b> @ {bet['odds']} → 投 {bet['stake']}")
     lines.append("")
-    lines.append(f"💰 ROI：<b>{match['roi']}%</b>  |  預期獲利：{match['profit']}")
+    # Bets
+    for bet in match["bets"]:
+        bm_key = bet["bookmaker"].lower().replace(" ", "_")
+        bm_url = BOOKMAKER_URLS.get(bm_key, "https://google.com/search?q=" + escape(bet["bookmaker"]))
+        lines.append(
+            f"🎲 <a href='{bm_url}'><b>{escape(bet['bookmaker'])}</b></a> @ {bet['odds']} → 投 {bet['stake']}"
+        )
+    lines.append("")
+    # ROI & profit
+    lines.append(f"💰 ROI：<b>{match['roi']}%</b>   |   預期獲利：{match['profit']}")
+    # Event link if provided
     if match.get("url"):
         lines.append(f"🔗 <a href='{escape(match['url'])}'>查看賽事詳情</a>")
-    return "\\n".join(lines)
 
+    return "
+".join(lines)
 
 # ------------------ Low‑level sender ------------------
 
@@ -143,17 +161,3 @@ def start_bot_polling():
 
     logger.info("🚀 Telegram Bot polling 開始…")
     app.run_polling(stop_signals=None)
-
-
-# telegram_notifier.py 最後，加入 error handler
-from telegram.error import Conflict
-
-async def _error_handler(update, context):
-    if isinstance(context.error, Conflict):
-        # 只記 debug，不丟整串 traceback
-        logger.debug("忽略 Telegram 409 Conflict（多重 polling）")
-    else:
-        logger.exception("Telegram Bot error", exc_info=context.error)
-
-app.add_error_handler(_error_handler)
-
