@@ -51,4 +51,4 @@ if __name__ == "__main__":
 # 1. 發送訊息改用 HTML <pre> 包裝，明確 parse_mode="HTML"，解決 400 解析錯誤。
 # 2. Thread 內手動設置 asyncio event loop，解決 RuntimeError。
 # 3. 重新部署後，Bot poll 與推播均應正常。
- (僅 worker log & import 行維持，不需其他改動)
+
