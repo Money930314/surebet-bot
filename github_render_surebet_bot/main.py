@@ -34,7 +34,7 @@ def worker():
         try:
             bets = fetch_surebets(min_roi=MIN_ROI)
             _latest = bets
-            logger.info("抓到 %d 筆 surebet", len(bets))
+            logger.info("抓到 %d 筆 surebet (ROI≥%.1f)", len(bets), MIN_ROI)
             if TELEGRAM_ENABLED and bets:
                 notify_telegram(bets[0])
         except Exception:
@@ -47,4 +47,5 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
 
 # === 說明 ===
-# requirements.txt 已加入 Flask；執行 `pip install -r requirements.txt` 後再跑 main.py。
+# 1. 修正 KeyError: 'league'（scraper now returns `league` key）。
+# 2. DEFAULT_SPORTS 更新：移除未知 sport、加入 UEFA Champions League。
