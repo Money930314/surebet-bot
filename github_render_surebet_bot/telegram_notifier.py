@@ -1,8 +1,6 @@
 """telegram_notifier.py
-1. `notify_telegram(match)`：推播單一 surebet 給固定 chat_id。
-2. Telegram Bot：支援 /start /help /roi 指令。
-   * 使用 HTML `<pre>` 包裝純文字，並明確傳 `parse_mode='HTML'`，避免預設 Markdown 造成 400。
-   * 在獨立 thread 中手動建立 asyncio event loop，解決 `RuntimeError: There is no current event loop`。
+推播 + 指令互動。
+修正：_format_match_plain() 的 join 換行字元寫錯導致 SyntaxError。
 """
 import os
 import logging
@@ -22,7 +20,7 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # 推播用；互動不需固定 chat_id
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -38,8 +36,7 @@ def _format_match_plain(match: Dict[str, Any]) -> str:
         lines.append(f"{bet['bookmaker']} @ {bet['odds']} → 投 {bet['stake']}")
     lines.append("")
     lines.append(f"ROI: {match['roi']}%  預期獲利: {match['profit']}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 # ------------------ 推播 ------------------
 
@@ -74,17 +71,15 @@ async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def _cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        textwrap.dedent(
-            """可用指令：
+    await update.message.reply_text(textwrap.dedent(
+        """可用指令：
         /roi          ➜ 取得 ROI 最高的 5 筆 Surebet
         /roi <sport>  ➜ 只看指定運動（如 soccer、basketball）
         /help         ➜ 這段說明
         """
-        )
-    )
+    ))
 
-from scraper import fetch_surebets  # 避免循環 import
+from scraper import fetch_surebets
 
 async def _cmd_roi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sport_filter = context.args[0] if context.args else None
@@ -96,9 +91,7 @@ async def _cmd_roi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("目前沒有符合條件的套利機會 🙇‍♂️")
         return
     for match in bets:
-        await update.message.reply_text(
-            f"<pre>{escape(_format_match_plain(match))}</pre>", parse_mode="HTML"
-        )
+        await update.message.reply_text(f"<pre>{escape(_format_match_plain(match))}</pre>", parse_mode="HTML")
 
 async def _unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("未支援的指令，請輸入 /help 查看。")
@@ -109,15 +102,13 @@ def start_bot_polling():
     if not BOT_TOKEN:
         logger.warning("未設定 TELEGRAM_BOT_TOKEN，跳過 Bot Polling")
         return
-
-    # 在線程內手動建立 event loop
     asyncio.set_event_loop(asyncio.new_event_loop())
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", _cmd_start))
     app.add_handler(CommandHandler("help", _cmd_help))
     app.add_handler(CommandHandler("roi", _cmd_roi))
-    app.add_handler(MessageHandler(filters.COMMAND, _unknown))  # 其他指令
+    app.add_handler(MessageHandler(filters.COMMAND, _unknown))
 
     logger.info("🚀 Telegram Bot polling 開始…")
     app.run_polling()
