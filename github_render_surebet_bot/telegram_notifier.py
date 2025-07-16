@@ -54,8 +54,8 @@ def _format_match_html(match: Dict[str, Any]) -> str:
     lines.append(f"💰 ROI：<b>{match['roi']}%</b>  |  預期獲利：{match['profit']}")
     if match.get("url"):
         lines.append(f"🔗 <a href='{escape(match['url'])}'>查看賽事詳情</a>")
-    return "
-".join
+    return "\\n".join(lines)
+
 
 # ------------------ Low‑level sender ------------------
 
