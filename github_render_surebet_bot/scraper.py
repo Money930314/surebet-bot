@@ -1,94 +1,111 @@
-import os
-import logging
-import datetime as _dt
-import requests
+# -*- coding: utf-8 -*-
+"""
+scraper.py  – 取盤並計算 surebet（Moneyline）
+------------------------------------------------
+• 擴充 FRIENDLY_BOOKMAKERS：共 9 家
+• API 同時抓多 regions (eu,us,uk) + markets (h2h,spreads,totals)
+• 60 秒記憶體快取，省免費配額
+"""
+from __future__ import annotations
+import os, logging, datetime as _dt, requests
+from functools import lru_cache
 
 logger = logging.getLogger("scraper")
 
-API_KEY = os.getenv("THE_ODDS_API_KEY", "")
-FRIENDLY_BOOKMAKERS = {"pinnacle", "betfair_ex", "smarkets"}
+API_KEY = os.getenv("THE_ODDS_API_KEY", "").strip()
+
+# 友善莊家白名單（可再增減）
+FRIENDLY_BOOKMAKERS = {
+    "pinnacle", "betfair_ex", "smarkets",
+    "bet365", "williamhill", "unibet",
+    "betfair", "ladbrokes", "marathonbet",
+}
 
 # -----------------------------------------------------------
-#  1) 先把官方 sport_key 全抓下來，分群存在 SPORT_GROUPS
+# 1) 讀取所有 active sport_key，分 group
 # -----------------------------------------------------------
 def _load_all_sport_keys() -> dict[str, list[str]]:
+    if not API_KEY:
+        return {}
     url = f"https://api.the-odds-api.com/v4/sports?apiKey={API_KEY}"
     try:
         data = requests.get(url, timeout=10).json()
-    except Exception as e:                      # noqa: BLE001
-        logger.error("load sports list error: %s", e)
+    except Exception as exc:                   # noqa: BLE001
+        logger.error("load sports list error: %s", exc)
         return {}
 
     groups: dict[str, list[str]] = {}
     for item in data:
-        key = item["key"]                      # 例：soccer_epl
-        group = key.split("_", 1)[0]           # 例：soccer
+        if not item.get("active"):
+            continue
+        key   = item["key"]               # soccer_epl
+        group = key.split("_", 1)[0]      # soccer
         groups.setdefault(group, []).append(key)
     return groups
 
-
-SPORT_GROUPS: dict[str, list[str]] = _load_all_sport_keys()
+SPORT_GROUPS = _load_all_sport_keys()
 
 # -----------------------------------------------------------
-#  2) Odds API 抓盤 + 計算 surebet
+# 2) 單一 sport_key 盤口（60 秒快取）
 # -----------------------------------------------------------
+@lru_cache(maxsize=256)
 def _fetch_odds_for_key(key: str) -> list[dict]:
+    if not API_KEY:
+        return []
     url = (
-        "https://api.the-odds-api.com/v4/sports/"
-        f"{key}/odds?regions=eu&markets=h2h"
+        f"https://api.the-odds-api.com/v4/sports/{key}/odds"
+        f"?regions=eu,us,uk"
+        f"&markets=h2h,spreads,totals"
         f"&oddsFormat=decimal&dateFormat=iso&apiKey={API_KEY}"
     )
     try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.HTTPError as e:
-        logger.debug("HTTPError %s (%s)", e.response.status_code, key)
-    except Exception as e:                      # noqa: BLE001
-        logger.error("fetch odds error: %s – %s", key, e)
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except requests.HTTPError as exc:
+        logger.debug("HTTP %s %s", exc.response.status_code, key)
+    except Exception as exc:               # noqa: BLE001
+        logger.error("fetch odds error: %s – %s", key, exc)
     return []
 
-
+# -----------------------------------------------------------
+# 3) 計算 Moneyline surebet
+# -----------------------------------------------------------
 def fetch_surebets(
-    sports: list[str] | None = None,
     *,
-    min_roi: float = 0.0,
+    sports: list[str] | None = None,
     total_stake: float = 100.0,
     days_window: int = 2,
+    min_roi: float = 0.0,
 ) -> list[dict]:
-    """回傳依 ROI 由高到低排序的 surebet list（最多 100 筆）"""
-
-    # ---- 解析 sports 參數：可傳大分類，也可傳精確 key ----
+    # 決定要抓哪些 sport_key
     if not sports:
-        sport_keys = [k for keys in SPORT_GROUPS.values() for k in keys]
+        sport_keys = [k for ks in SPORT_GROUPS.values() for k in ks]
     else:
         sport_keys: list[str] = []
         for s in sports:
             s = s.lower()
             sport_keys.extend(SPORT_GROUPS.get(s, [s]))
-        # 去重
         sport_keys = list(dict.fromkeys(sport_keys))
 
     today = _dt.date.today()
-    end_date = today + _dt.timedelta(days=days_window)
+    end   = today + _dt.timedelta(days=days_window)
     results: list[dict] = []
 
     for key in sport_keys:
         for ev in _fetch_odds_for_key(key):
-            # 只要「今天～days_window 天後」的賽事
-            c_time = _dt.datetime.fromisoformat(
-                ev["commence_time"].replace("Z", "+00:00")
-            )
-            if not (today <= c_time.date() <= end_date):
+            # 日期篩選
+            t = _dt.datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00"))
+            if not (today <= t.date() <= end):
                 continue
 
-            # 只留白名單莊家
-            bms = [bm for bm in ev.get("bookmakers", []) if bm["key"] in FRIENDLY_BOOKMAKERS]
+            # 白名單莊家
+            bms = [bm for bm in ev["bookmakers"] if bm["key"] in FRIENDLY_BOOKMAKERS]
             if len(bms) < 2:
                 continue
 
-            # 擷取每家莊家 Moneyline 兩隊賠率
-            lines: list[tuple[str, float, float]] = []
+            # 只取 Moneyline
+            lines: list[tuple[str,float,float]] = []
             for bm in bms:
                 for m in bm["markets"]:
                     if m["key"] != "h2h":
@@ -98,48 +115,37 @@ def fetch_surebets(
             if len(lines) < 2:
                 continue
 
-            # 任取兩家莊家做組合，計算 ROI
             for i in range(len(lines)):
-                for j in range(i + 1, len(lines)):
-                    bm1, p1_home, p1_away = lines[i]
-                    bm2, p2_home, p2_away = lines[j]
+                for j in range(i+1, len(lines)):
+                    bm1, p1h, p1a = lines[i]
+                    bm2, p2h, p2a = lines[j]
 
-                    # 只考慮同一隊伍對位
-                    if p1_home <= p2_home:          # 取賠率較高的一邊
-                        odd_home, bm_home = p2_home, bm2
-                        odd_away, bm_away = p1_away, bm1
-                    else:
-                        odd_home, bm_home = p1_home, bm1
-                        odd_away, bm_away = p2_away, bm2
+                    odd_home, bm_home = (p1h, bm1) if p1h >= p2h else (p2h, bm2)
+                    odd_away, bm_away = (p2a, bm2) if p1h >= p2h else (p1a, bm1)
 
-                    inv_sum = 1 / odd_home + 1 / odd_away
-                    if inv_sum >= 1:
+                    inv = 1/odd_home + 1/odd_away
+                    if inv >= 1:
                         continue
-
-                    roi = round((1 / inv_sum - 1) * 100, 2)
+                    roi = round((1/inv - 1)*100, 2)
                     if roi < min_roi:
                         continue
 
-                    stake_home = round(total_stake * (1 / odd_home) / inv_sum, 2)
-                    stake_away = round(total_stake - stake_home, 2)
+                    st_home = round(total_stake*(1/odd_home)/inv, 2)
+                    st_away = round(total_stake - st_home, 2)
 
-                    results.append(
-                        {
-                            "sport": ev["sport_title"],
-                            "sport_key": ev["sport_key"],
-                            "league": key,
-                            "teams": ev["teams"],
-                            "commence_time": ev["commence_time"],
-                            "bookie1": bm_home,
-                            "odd1": odd_home,
-                            "stake1": stake_home,
-                            "bookie2": bm_away,
-                            "odd2": odd_away,
-                            "stake2": stake_away,
-                            "roi": roi,
-                            "profit": round(total_stake * roi / 100, 2),
-                        }
-                    )
+                    results.append({
+                        "sport": ev["sport_title"],
+                        "sport_key": ev["sport_key"],
+                        "teams": ev["teams"],
+                        "commence_time": ev["commence_time"],
+                        "bookie1": bm_home, "odd1": odd_home, "stake1": st_home,
+                        "bookie2": bm_away, "odd2": odd_away, "stake2": st_away,
+                        "roi": roi,
+                        "profit": round(total_stake*roi/100, 2),
+                    })
 
     results.sort(key=lambda x: x["roi"], reverse=True)
-    return results[:100]   # 最多回傳 100 筆
+    return results[:100]
+
+def clear_cache() -> None:
+    _fetch_odds_for_key.cache_clear()
