@@ -5,7 +5,7 @@ services:
     env: python
     plan: free                   # 保持 Free 計畫
     buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: python github_render_surebet_bot/main.py
     healthCheckPath: /healthz
 
   # ─── ② 免費 Cron Job：每 14 分鐘喚醒一次 ───
