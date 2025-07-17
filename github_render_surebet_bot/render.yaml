@@ -1,12 +1,17 @@
 services:
+  # ─── ① 你的 Web Service（名稱、指令依照目前 Render 設定即可） ───
   - type: web
-    name: surebet-bot
+    name: surebet-bot            # ← 若 Render 後台名稱不同，請對應修改
     env: python
+    plan: free                   # 保持 Free 計畫
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
-    # 環境變數改為在 Render 控制台設定，避免敏感資料外洩
-    # envVars:
-    #   - key: TELEGRAM_BOT_TOKEN
-    #     value: 請在 Render 控制台手動設定
-    #   - key: TELEGRAM_CHAT_ID
-    #     value: 請在 Render 控制台手動設定
+    healthCheckPath: /healthz
+
+  # ─── ② 免費 Cron Job：每 14 分鐘喚醒一次 ───
+  - type: cron
+    name: keep-alive
+    env: docker
+    schedule: "*/14 * * * *"     # CRON 表達式：每 14 分鐘
+    dockerFilePath: cron.Dockerfile
+
