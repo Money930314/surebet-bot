@@ -8,10 +8,10 @@ services:
     startCommand: python github_render_surebet_bot/main.py
     healthCheckPath: /healthz
 
-  # ─── ② 免費 Cron Job：每 14 分鐘喚醒一次 ───
+  # ─── ② 免費 Cron Job：每 5 分鐘喚醒一次 ───
   - type: cron
     name: keep-alive
     env: docker
-    schedule: "*/14 * * * *"     # CRON 表達式：每 14 分鐘
+    schedule: "*/5 * * * *"     # CRON 表達式：每 14 分鐘
     dockerFilePath: cron.Dockerfile
 
