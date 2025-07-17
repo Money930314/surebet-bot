@@ -13,8 +13,9 @@ app = Flask(__name__)
 
 
 @app.route("/healthz")
-def health() -> tuple[str, int]:
+def health():
     return "ok", 200
+
 
 
 @app.route("/surebets")
