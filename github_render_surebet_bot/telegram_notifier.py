@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-telegram_notifier.py  –  Telegram Bot 指令處理
+telegram_notifier.py  –  Telegram Bot 指令
 ------------------------------------------------
-• 先註冊所有 /roi 類指令，再放 _unknown fallback，避免被攔截
-• 預設 DEBUG log，方便排錯
+• /roi 指令已移除，功能整合到 /scan
+• 新增 /sport：列出目前有開賽的追蹤運動
+• /help 文字同步更新
 """
-
 from __future__ import annotations
 import os, html, asyncio, logging, datetime as _dt
 from typing import List, Tuple
@@ -19,10 +19,15 @@ from telegram.ext import (
     filters,
 )
 
-from scraper import fetch_surebets, SPORT_GROUPS
+from scraper import (
+    fetch_surebets,
+    active_tracked_sports,
+    TRACKED_SPORT_KEYS,
+    SPORT_TITLES,
+)
 
 # ---------- 基本設定 ----------
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("telegram_notifier")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -68,21 +73,18 @@ def _fmt(m: dict) -> str:
     lines.append(f"💰 ROI：{m['roi']}% | 預期獲利：{m['profit']}")
     return "\n".join(lines)
 
-# ---------- 指令解析 ----------
-def _parse_roi_args(cmd: str, tokens: List[str]) -> Tuple[float, int, List[str]]:
+# ---------- 參數解析 ----------
+def _parse_scan_args(tokens: List[str]) -> Tuple[float, int, List[str] | None]:
+    """tokens: [sport?] [stake?] [days?]"""
     stake, days, sport = DEFAULT_STAKE, DEFAULT_DAYS, None
-    if cmd.startswith("roi") and len(cmd) > 3:
-        sport = cmd[3:]
-
     for tok in tokens:
-        if tok.isalpha() and not sport:
-            sport = tok
+        if tok.lower() in TRACKED_SPORT_KEYS and not sport:
+            sport = tok.lower()
         elif tok.replace(".", "", 1).isdigit():
             if stake == DEFAULT_STAKE:
                 stake = float(tok)
             else:
                 days = int(float(tok))
-
     days = min(max(days, 1), MAX_DAYS)
     sports = [sport] if sport else None
     return stake, days, sports
@@ -96,16 +98,16 @@ async def _cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def _cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    sports = ", ".join(sorted(SPORT_GROUPS.keys()))
+    sports = ", ".join(SPORT_TITLES[key] for key in TRACKED_SPORT_KEYS)
     await update.message.reply_text(
         "🛠 <b>使用說明</b>\n"
         "/start – 打招呼\n"
         "/help – 說明\n"
-        "/scan – 同 /roi\n"
-        "/roi [運動] [注金] [天數] – 查套利\n"
-        "  例：/roi soccer 150 7\n"
+        "/scan [運動] [注金] [天數] – 掃描套利 (moneyline)\n"
+        "  例：/scan soccer_epl 150 7\n"
+        "/sport – 查看目前有開賽的追蹤運動\n"
         "/bookies – 友善莊家名單\n"
-        f"支援運動：{sports}",
+        f"追蹤運動：{sports}",
         parse_mode="HTML",
     )
 
@@ -115,11 +117,18 @@ async def _cmd_bookies(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="HTML",
     )
 
-async def _cmd_roi(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    cmd     = update.message.text.split()[0][1:]  # 去掉 '/'
-    tokens  = update.message.text.split()[1:]
-    stake, days, sports = _parse_roi_args(cmd, tokens)
-    logger.debug("ROI cmd args sports=%s stake=%s days=%s", sports, stake, days)
+async def _cmd_sport(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    active = active_tracked_sports()
+    if not active:
+        await update.message.reply_text("😴 目前追蹤的運動都在休季。")
+        return
+    txt = "📅 目前開賽運動：\n" + "\n".join(f"• {title} (`{key}`)" for key, title in active)
+    await update.message.reply_markdown_v2(txt, disable_web_page_preview=True)
+
+async def _cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    tokens = update.message.text.split()[1:]
+    stake, days, sports = _parse_scan_args(tokens)
+    logger.info("SCAN args sports=%s stake=%s days=%s", sports, stake, days)
 
     matches = fetch_surebets(
         sports=sports, total_stake=stake, days_window=days
@@ -148,18 +157,13 @@ def start_bot_polling() -> None:
     asyncio.set_event_loop(asyncio.new_event_loop())
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # 先註冊所有已知指令
     app.add_handler(CommandHandler("start", _cmd_start))
     app.add_handler(CommandHandler("help",  _cmd_help))
-    app.add_handler(CommandHandler("scan",  _cmd_roi))
+    app.add_handler(CommandHandler("scan",  _cmd_scan))
+    app.add_handler(CommandHandler("sport", _cmd_sport))
     app.add_handler(CommandHandler("bookies", _cmd_bookies))
-    app.add_handler(CommandHandler("roi",   _cmd_roi))
 
-    # 快捷 /roisoccer, /roibaseball…
-    for g in SPORT_GROUPS:
-        app.add_handler(CommandHandler(f"roi{g}", _cmd_roi))
-
-    # *最後* 再放 unknown fallback
+    # *最後* fallback
     app.add_handler(MessageHandler(filters.COMMAND, _unknown))
 
     logger.info("🚀 Telegram Bot polling 開始…")
