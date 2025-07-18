@@ -1,18 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-scraper.py  – 取盤並計算 surebet（Moneyline）
+scraper.py  –  只抓 Moneyline 盤並計算 surebet
 ------------------------------------------------
-• 擴充 FRIENDLY_BOOKMAKERS：共 9 家
-• API 同時抓多 regions (eu,us,uk) + markets (h2h,spreads,totals)
-• 60 秒記憶體快取，省免費配額
+滿足新需求：
+1. 僅抓 h2h (moneyline)；不再抓 spreads / totals
+2. 預設僅追蹤 6 個跨季熱門聯盟，全年都有球可下
+3. 內建 2 小時記憶體快取 → 每個 sport_key 最多 12 次 / 日
+4. 提供 active_tracked_sports() 供 /sport 指令使用
 """
 from __future__ import annotations
-import os, logging, datetime as _dt, requests
-from functools import lru_cache
+import os, time, logging, datetime as _dt, requests
 
 logger = logging.getLogger("scraper")
-
 API_KEY = os.getenv("THE_ODDS_API_KEY", "").strip()
+
+# ---------------- 熱門運動常量 ----------------
+TRACKED_SPORT_KEYS = [
+    "soccer_epl",          # 8 月–5 月
+    "basketball_nba",      # 10 月–6 月
+    "baseball_mlb",        # 3 月–10 月
+    "icehockey_nhl",       # 10 月–6 月
+    "tennis_atp",          # 全年
+    "americanfootball_nfl" # 9 月–2 月
+]
+SPORT_TITLES = {
+    "soccer_epl": "英超足球",
+    "basketball_nba": "NBA 籃球",
+    "baseball_mlb": "MLB 棒球",
+    "icehockey_nhl": "NHL 冰球",
+    "tennis_atp": "ATP 網球",
+    "americanfootball_nfl": "NFL 美式足球",
+}
 
 # 友善莊家白名單（可再增減）
 FRIENDLY_BOOKMAKERS = {
@@ -21,56 +39,64 @@ FRIENDLY_BOOKMAKERS = {
     "betfair", "ladbrokes", "marathonbet",
 }
 
-# -----------------------------------------------------------
-# 1) 讀取所有 active sport_key，分 group
-# -----------------------------------------------------------
-def _load_all_sport_keys() -> dict[str, list[str]]:
-    if not API_KEY:
-        return {}
-    url = f"https://api.the-odds-api.com/v4/sports?apiKey={API_KEY}"
-    try:
-        data = requests.get(url, timeout=10).json()
-    except Exception as exc:                   # noqa: BLE001
-        logger.error("load sports list error: %s", exc)
-        return {}
+# ---------------- API 快取 ----------------
+_ODDS_CACHE: dict[str, dict] = {}
+_CACHE_TTL = 7200  # 秒；2 小時
 
-    groups: dict[str, list[str]] = {}
-    for item in data:
-        if not item.get("active"):
-            continue
-        key   = item["key"]               # soccer_epl
-        group = key.split("_", 1)[0]      # soccer
-        groups.setdefault(group, []).append(key)
-    return groups
-
-SPORT_GROUPS = _load_all_sport_keys()
-
-# -----------------------------------------------------------
-# 2) 單一 sport_key 盤口（60 秒快取）
-# -----------------------------------------------------------
-@lru_cache(maxsize=256)
 def _fetch_odds_for_key(key: str) -> list[dict]:
+    """抓指定 sport_key 的 moneyline 盤；結果 2 小時快取。"""
+    now = time.time()
+    if key in _ODDS_CACHE and now - _ODDS_CACHE[key]["ts"] < _CACHE_TTL:
+        return _ODDS_CACHE[key]["data"]
+
     if not API_KEY:
         return []
     url = (
         f"https://api.the-odds-api.com/v4/sports/{key}/odds"
         f"?regions=eu,us,uk"
-        f"&markets=h2h,spreads,totals"
+        f"&markets=h2h"
         f"&oddsFormat=decimal&dateFormat=iso&apiKey={API_KEY}"
     )
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        return r.json()
-    except requests.HTTPError as exc:
-        logger.debug("HTTP %s %s", exc.response.status_code, key)
-    except Exception as exc:               # noqa: BLE001
-        logger.error("fetch odds error: %s – %s", key, exc)
-    return []
+        data = r.json()
+        _ODDS_CACHE[key] = {"ts": now, "data": data}
+        return data
+    except Exception as exc:                   # noqa: BLE001
+        logger.error("fetch odds error (%s): %s", key, exc)
+        return []
 
-# -----------------------------------------------------------
-# 3) 計算 Moneyline surebet
-# -----------------------------------------------------------
+def clear_cache() -> None:
+    _ODDS_CACHE.clear()
+
+# ---------------- /sport 用 ----------------
+_SPORTS_CACHE: dict[str, dict] = {}
+
+def active_tracked_sports() -> list[tuple[str, str]]:
+    """回傳目前 `active=true` 的追蹤運動 [(key, title), ...]；6 小時快取。"""
+    now = time.time()
+    if "data" in _SPORTS_CACHE and now - _SPORTS_CACHE["ts"] < 21600:
+        return _SPORTS_CACHE["data"]
+
+    if not API_KEY:
+        return []
+    url = f"https://api.the-odds-api.com/v4/sports?apiKey={API_KEY}"
+    try:
+        data = requests.get(url, timeout=10).json()
+    except Exception as exc:                   # noqa: BLE001
+        logger.error("load sports list error: %s", exc)
+        return []
+
+    active = [
+        (item["key"], SPORT_TITLES.get(item["key"], item["title"]))
+        for item in data
+        if item["key"] in TRACKED_SPORT_KEYS and item.get("active")
+    ]
+    _SPORTS_CACHE.update({"ts": now, "data": active})
+    return active
+
+# ---------------- 計算 surebet ----------------
 def fetch_surebets(
     *,
     sports: list[str] | None = None,
@@ -78,15 +104,17 @@ def fetch_surebets(
     days_window: int = 2,
     min_roi: float = 0.0,
 ) -> list[dict]:
+    """
+    回傳 surebet 列表，每筆：
+    {sport, sport_key, teams[], commence_time, bookmaker/odd/stake 1&2, roi, profit}
+    """
     # 決定要抓哪些 sport_key
     if not sports:
-        sport_keys = [k for ks in SPORT_GROUPS.values() for k in ks]
+        sport_keys = TRACKED_SPORT_KEYS
     else:
-        sport_keys: list[str] = []
-        for s in sports:
-            s = s.lower()
-            sport_keys.extend(SPORT_GROUPS.get(s, [s]))
-        sport_keys = list(dict.fromkeys(sport_keys))
+        sport_keys = [s for s in sports if s in TRACKED_SPORT_KEYS]
+        if not sport_keys:
+            sport_keys = TRACKED_SPORT_KEYS
 
     today = _dt.date.today()
     end   = today + _dt.timedelta(days=days_window)
@@ -104,7 +132,7 @@ def fetch_surebets(
             if len(bms) < 2:
                 continue
 
-            # 只取 Moneyline
+            # Moneyline
             lines: list[tuple[str,float,float]] = []
             for bm in bms:
                 for m in bm["markets"]:
@@ -115,13 +143,14 @@ def fetch_surebets(
             if len(lines) < 2:
                 continue
 
+            # 任兩家莊家組合
             for i in range(len(lines)):
                 for j in range(i+1, len(lines)):
                     bm1, p1h, p1a = lines[i]
                     bm2, p2h, p2a = lines[j]
 
                     odd_home, bm_home = (p1h, bm1) if p1h >= p2h else (p2h, bm2)
-                    odd_away, bm_away = (p2a, bm2) if p1h >= p2h else (p1a, bm1)
+                    odd_away, bm_away = (p2a, bm2) if p1a >= p2a else (p1a, bm1)
 
                     inv = 1/odd_home + 1/odd_away
                     if inv >= 1:
@@ -134,8 +163,8 @@ def fetch_surebets(
                     st_away = round(total_stake - st_home, 2)
 
                     results.append({
-                        "sport": ev["sport_title"],
-                        "sport_key": ev["sport_key"],
+                        "sport": SPORT_TITLES.get(key, ev["sport_title"]),
+                        "sport_key": key,
                         "teams": ev["teams"],
                         "commence_time": ev["commence_time"],
                         "bookie1": bm_home, "odd1": odd_home, "stake1": st_home,
@@ -146,6 +175,3 @@ def fetch_surebets(
 
     results.sort(key=lambda x: x["roi"], reverse=True)
     return results[:100]
-
-def clear_cache() -> None:
-    _fetch_odds_for_key.cache_clear()
