@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-telegram_notifier.py  –  Telegram Bot 指令 (2025-07-18 fix-2)
+telegram_notifier.py  –  Telegram Bot 指令 (2025-07-18 fix-3)
 --------------------------------------------------------------
-• /sport 改純文字回覆，並加 try/except 確保一定回訊息
-• /scan 先回「掃描中…」→ 後續編輯結果；任何例外皆捕捉
+• /scan 預設僅回傳 ROI 最高前 5 筆
+• /help 新增「運動對應 sport_key + 指令範例」說明
 """
 from __future__ import annotations
 import os, html, logging, asyncio, datetime as _dt
@@ -36,15 +36,15 @@ DEFAULT_DAYS  = 2
 MAX_DAYS      = 60
 
 BOOKMAKER_URLS = {
-    "pinnacle":        "https://www.pinnacle.com",
-    "betfair_ex":      "https://www.betfair.com/exchange",
-    "smarkets":        "https://smarkets.com",
-    "bet365":          "https://www.bet365.com",
-    "williamhill":     "https://sports.williamhill.com",
-    "unibet":          "https://www.unibet.com",
-    "betfair":         "https://www.betfair.com/sport",
-    "ladbrokes":       "https://sports.ladbrokes.com",
-    "marathonbet":     "https://www.marathonbet.com",
+    "pinnacle":    "https://www.pinnacle.com",
+    "betfair_ex":  "https://www.betfair.com/exchange",
+    "smarkets":    "https://smarkets.com",
+    "bet365":      "https://www.bet365.com",
+    "williamhill": "https://sports.williamhill.com",
+    "unibet":      "https://www.unibet.com",
+    "betfair":     "https://www.betfair.com/sport",
+    "ladbrokes":   "https://sports.ladbrokes.com",
+    "marathonbet": "https://www.marathonbet.com",
 }
 
 # ---------- 訊息格式 ----------
@@ -97,16 +97,22 @@ async def _cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def _cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    sports = ", ".join(SPORT_TITLES[k] for k in TRACKED_SPORT_KEYS)
+    # 運動對照清單
+    mapping = "\n".join(
+        f"  • {SPORT_TITLES[k]} → {k}" for k in TRACKED_SPORT_KEYS
+    )
+    example = "/scan tennis_atp 150 3  ← 查詢『網球』三天內的盤口\n"
     await update.message.reply_text(
         "🛠 <b>使用說明</b>\n"
         "/start – 打招呼\n"
         "/help – 說明\n"
         "/scan [運動] [注金] [天數] – 掃描套利 (moneyline)\n"
-        "  範例：/scan tennis_atp 150 7\n"
+        f"{example}"
         "/sport – 查看目前有開賽的追蹤運動\n"
         "/bookies – 友善莊家名單\n\n"
-        f"追蹤運動：{sports}",
+        "目前支援運動 (sport_key)：\n"
+        f"{mapping}\n\n"
+        "⚠️ 機器人只會回傳『ROI 最高前 5 筆』結果，以節省閱讀與 API 額度。",
         parse_mode="HTML",
     )
 
@@ -147,7 +153,7 @@ async def _cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             sports=sports,
             total_stake=stake,
             days_window=days,
-        )[:5]
+        )[:5]  # ← 只取 ROI 最高前 5 筆
 
         if not bets:
             await wait_msg.edit_text(
