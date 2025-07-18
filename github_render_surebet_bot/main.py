@@ -1,9 +1,10 @@
 import os
-import logging
 import threading
-from flask import Flask, jsonify, request
+import logging
+from flask import Flask, jsonify
 
-from scraper import fetch_surebets
+# 修改：使用新的 top_surebets 取代 fetch_surebets
+from scraper import top_surebets
 from telegram_notifier import start_bot_polling
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -19,25 +20,15 @@ def health():
 
 @app.route("/surebets")
 def route_surebets():
-    """REST：/surebets?sport=soccer_epl&stake=150&days=7&min_roi=2"""
-    sport = request.args.get("sport")
-    sports = [sport] if sport else None
-
-    stake = float(request.args.get("stake", 100))
-    days = max(1, min(int(request.args.get("days", 2)), 60))
-    min_roi = float(request.args.get("min_roi", 0))
-
-    data = fetch_surebets(
-        sports=sports,
-        total_stake=stake,
-        days_window=days,
-        min_roi=min_roi,
-    )[:5]
+    """REST：直接回傳最新五筆 ROI 最高的套利"""
+    data = top_surebets()
     return jsonify(data)
 
 
-# --- 背景啟動 Telegram Bot ---
+# 背景啟動 Telegram Bot
 threading.Thread(target=start_bot_polling, daemon=True).start()
 
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
