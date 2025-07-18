@@ -17,10 +17,9 @@ def health():
     return "ok", 200
 
 
-
 @app.route("/surebets")
 def route_surebets():
-    """REST：/surebets?sport=soccer&stake=150&days=7&min_roi=2"""
+    """REST：/surebets?sport=soccer_epl&stake=150&days=7&min_roi=2"""
     sport = request.args.get("sport")
     sports = [sport] if sport else None
 
