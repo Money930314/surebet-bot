@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-telegram_notifier.py  –  Telegram Bot 指令
-------------------------------------------------
-• /roi 指令已移除，功能整合到 /scan
-• 新增 /sport：列出目前有開賽的追蹤運動
-• /help 文字同步更新
+telegram_notifier.py  –  Telegram Bot 指令 (2025-07-18 修正版)
+--------------------------------------------------------------
+• /scan 先送「正在掃描」訊息，完成後再編輯結果
+• 如指定運動目前休季 / 無盤，立即回覆原因
+• 加入 try/except，任何錯誤都能回報而不會安靜失敗
 """
 from __future__ import annotations
-import os, html, asyncio, logging, datetime as _dt
+import os, html, logging, asyncio, datetime as _dt
 from typing import List, Tuple
 
+import requests
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -78,13 +79,14 @@ def _parse_scan_args(tokens: List[str]) -> Tuple[float, int, List[str] | None]:
     """tokens: [sport?] [stake?] [days?]"""
     stake, days, sport = DEFAULT_STAKE, DEFAULT_DAYS, None
     for tok in tokens:
-        if tok.lower() in TRACKED_SPORT_KEYS and not sport:
-            sport = tok.lower()
-        elif tok.replace(".", "", 1).isdigit():
+        t = tok.lower()
+        if t in TRACKED_SPORT_KEYS and not sport:
+            sport = t
+        elif t.replace(".", "", 1).isdigit():
             if stake == DEFAULT_STAKE:
-                stake = float(tok)
+                stake = float(t)
             else:
-                days = int(float(tok))
+                days = int(float(t))
     days = min(max(days, 1), MAX_DAYS)
     sports = [sport] if sport else None
     return stake, days, sports
@@ -98,13 +100,13 @@ async def _cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def _cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    sports = ", ".join(SPORT_TITLES[key] for key in TRACKED_SPORT_KEYS)
+    sports = ", ".join(SPORT_TITLES[k] for k in TRACKED_SPORT_KEYS)
     await update.message.reply_text(
         "🛠 <b>使用說明</b>\n"
         "/start – 打招呼\n"
         "/help – 說明\n"
         "/scan [運動] [注金] [天數] – 掃描套利 (moneyline)\n"
-        "  例：/scan soccer_epl 150 7\n"
+        "  範例：/scan tennis_atp 150 7\n"
         "/sport – 查看目前有開賽的追蹤運動\n"
         "/bookies – 友善莊家名單\n"
         f"追蹤運動：{sports}",
@@ -126,32 +128,55 @@ async def _cmd_sport(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_markdown_v2(txt, disable_web_page_preview=True)
 
 async def _cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    # ---- 解析參數 ----
     tokens = update.message.text.split()[1:]
     stake, days, sports = _parse_scan_args(tokens)
+    sport_str = sports[0] if sports else "*多運動*"
     logger.info("SCAN args sports=%s stake=%s days=%s", sports, stake, days)
 
-    matches = fetch_surebets(
-        sports=sports, total_stake=stake, days_window=days
-    )[:5]
+    # ---- 先告知正在掃描 ----
+    wait_msg = await update.message.reply_text("🔍 正在掃描，請稍候…")
 
-    if not matches:
-        await update.message.reply_text(
-            "😔 找不到符合條件的套利，可能 API 無盤或配額不足，試其他運動或天數。"
-        )
-        return
+    try:
+        # 若有指定運動且目前不在 active list，直接提示
+        if sports and sports[0] not in [k for k, _ in active_tracked_sports()]:
+            await wait_msg.edit_text(
+                f"📌 `{sport_str}` 目前休季或 Odds API 尚未開盤，"
+                "請改用 /sport 查詢可投注聯盟。",
+                parse_mode="Markdown",
+            )
+            return
 
-    for m in matches:
-        await update.message.reply_text(
-            _fmt(m), parse_mode="HTML", disable_web_page_preview=False
+        matches = fetch_surebets(
+            sports=sports, total_stake=stake, days_window=days
+        )[:5]
+
+        if not matches:
+            await wait_msg.edit_text(
+                "🙈 找不到符合條件的套利，可能還沒開盤或 ROI < 0%。"
+                "也許換個運動 / 天數再試看看！"
+            )
+            return
+
+        await wait_msg.edit_text(
+            "\n\n".join(_fmt(m) for m in matches),
+            parse_mode="HTML",
+            disable_web_page_preview=False,
         )
+
+    except requests.exceptions.Timeout:
+        await wait_msg.edit_text("⏰ Odds API 逾時，稍後再試吧！")
+    except Exception as exc:                                    # noqa: BLE001
+        logger.exception("scan error: %s", exc)
+        await wait_msg.edit_text(f"⚠️ 執行時發生錯誤：{exc}")
 
 async def _unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("指令無法識別，請 /help 查看。")
 
 # ---------- 啟動 Polling ----------
 def start_bot_polling() -> None:
-    if not (BOT_TOKEN and CHAT_ID):
-        logger.warning("Telegram Bot token 或 chat_id 未設定，Bot 不啟動")
+    if not BOT_TOKEN:
+        logger.warning("Telegram Bot token 未設定，Bot 不啟動")
         return
 
     asyncio.set_event_loop(asyncio.new_event_loop())
